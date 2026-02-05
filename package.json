@@ -4,7 +4,7 @@
   "description": "Locus - Local note-taker with AI transcription and summarization",
   "main": "./out/main/index.js",
   "author": "example.com",
-  "homepage": "https://electron-vite.org",
+  "homepage": "https://github.com/noevoapps/Locus-NoteBook",
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
