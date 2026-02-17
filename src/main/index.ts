@@ -39,10 +39,12 @@ Sentry.init({
   }
 })
 
-// Aptabase must be initialized before app is ready
-aptabaseInitialize(process.env.APTABASE_KEY || 'A-US-6714554317').catch(() => {
-  /* ignore */
-})
+// Aptabase init promise: must be called before app is ready (we await inside whenReady before first event)
+const aptabaseInitPromise = aptabaseInitialize(process.env.APTABASE_KEY || 'A-US-6714554317').catch(
+  () => {
+    /* ignore */
+  }
+)
 
 // Theme colors for title bar overlay (sidebar bg, symbol/icon color)
 const THEME_OVERLAY_COLORS: Record<string, { color: string; symbolColor: string }> = {
@@ -251,7 +253,9 @@ app.whenReady().then(async () => {
     return { sent: true }
   })
 
-  trackEvent('app_started')
+  // Ensure Aptabase is ready before first event so app_version is set correctly in the dashboard
+  await aptabaseInitPromise
+  trackEvent('app_started', { app_version: app.getVersion() })
 
   // Update title bar overlay when theme changes (Windows/Linux)
   ipcMain.handle('set-title-bar-theme', (_event, themeId: string) => {

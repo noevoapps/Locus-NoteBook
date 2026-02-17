@@ -19,7 +19,8 @@ win:
     - from: python_backend/dist/transcriber.exe
       to: transcriber.exe
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  # Must match the filename on GitHub Releases exactly (no spaces) so electron-updater can download.
+  artifactName: ${productName}.Setup.${version}.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
