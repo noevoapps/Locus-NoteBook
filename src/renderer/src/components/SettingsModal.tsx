@@ -69,12 +69,12 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
       classNames={{
         inner: '!bg-sidebar',
         content: '!bg-sidebar border border-border rounded-[20px] overflow-hidden',
-        header: '!bg-sidebar border-b border-border',
+        header: '!bg-sidebar border-b border-border !pb-3',
         title: 'text-foreground',
-        body: '!bg-sidebar'
+        body: '!bg-sidebar !pt-3'
       }}
     >
-      <div className="space-y-6">
+      <div className="space-y-4">
         <section>
           <Switch
             label="Share anonymous crash reports & usage data"
