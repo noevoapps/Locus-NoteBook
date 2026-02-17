@@ -75,6 +75,19 @@ import { twMerge } from 'tailwind-merge'
 import appIcon from './assets/icon.png'
 
 type NoteMeta = { id: string; title: string; updatedAt: number }
+
+/** Format release notes for display: strip HTML and support string or array from GitHub. */
+function formatReleaseNotes(notes: unknown): string {
+  const strip = (s: string) => s.replace(/<[^>]+>/g, ' ').replace(/\s{2,}/g, ' ').trim()
+  if (typeof notes === 'string') return strip(notes)
+  if (Array.isArray(notes)) {
+    return notes
+      .map((n) => (typeof n === 'string' ? strip(n) : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return ''
+}
 type FolderMetadata = { icon: string; color: string }
 type NotesData = {
   folders: string[]
@@ -2051,9 +2064,9 @@ export default function App(): React.JSX.Element {
                   ? `A new version of Locus (${updateVersion}) is available.`
                   : 'A new version of Locus is available.'}
               </p>
-              {updateReleaseNotes && typeof updateReleaseNotes === 'string' && (
+              {updateReleaseNotes != null && formatReleaseNotes(updateReleaseNotes) && (
                 <div className="max-h-40 overflow-auto rounded-lg bg-[#27241f] border border-border p-2 text-xs text-muted whitespace-pre-wrap">
-                  {updateReleaseNotes}
+                  {formatReleaseNotes(updateReleaseNotes)}
                 </div>
               )}
             </>

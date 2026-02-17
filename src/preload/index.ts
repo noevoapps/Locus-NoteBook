@@ -21,6 +21,7 @@ const api = {
     ipcRenderer.invoke('run-summary', payload) as Promise<string>,
   exportAudioAsWav: (dataUrl: string) =>
     ipcRenderer.invoke('export-audio-as-wav', dataUrl) as Promise<{ success: boolean; error?: string; canceled?: boolean }>,
+  getAppVersion: () => ipcRenderer.invoke('get-app-version') as Promise<string>,
   checkForUpdates: () =>
     ipcRenderer.invoke('check-for-updates') as Promise<{
       success: boolean

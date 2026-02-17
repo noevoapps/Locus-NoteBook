@@ -11,6 +11,25 @@ import { autoUpdater } from 'electron-updater'
 
 const isWindows = process.platform === 'win32'
 
+/** Returns true if remote is a newer semver than current (e.g. 1.0.2 > 1.0.1). */
+function isVersionNewer(remote: string, current: string): boolean {
+  const parse = (v: string): number[] =>
+    v
+      .replace(/^v/i, '')
+      .split('.')
+      .map((n) => parseInt(n, 10) || 0)
+  const r = parse(remote)
+  const c = parse(current)
+  const len = Math.max(r.length, c.length)
+  for (let i = 0; i < len; i++) {
+    const a = r[i] ?? 0
+    const b = c[i] ?? 0
+    if (a > b) return true
+    if (a < b) return false
+  }
+  return false
+}
+
 // Privacy-first crash reporting: only send if user opted in
 Sentry.init({
   dsn: process.env.SENTRY_DSN || 'https://95be6fe73d23d7158ed1ad18a8ab679a@o4510869943681024.ingest.us.sentry.io/4510869956657152',
@@ -155,6 +174,8 @@ app.whenReady().then(async () => {
   })
 
   autoUpdater.on('update-available', (info) => {
+    const currentVersion = app.getVersion()
+    if (!isVersionNewer(info.version, currentVersion)) return
     if (mainWindowRef) {
       mainWindowRef.webContents.send('update-available', {
         version: info.version,
@@ -190,11 +211,14 @@ app.whenReady().then(async () => {
     try {
       const result = await autoUpdater.checkForUpdates()
       const info = result?.updateInfo
-      return {
-        success: true,
-        updateInfo: info
+      const currentVersion = app.getVersion()
+      const updateInfo =
+        info && isVersionNewer(info.version, currentVersion)
           ? { version: info.version, releaseNotes: info.releaseNotes ?? null }
           : null
+      return {
+        success: true,
+        updateInfo
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -202,6 +226,8 @@ app.whenReady().then(async () => {
       return { success: false, error: message }
     }
   })
+
+  ipcMain.handle('get-app-version', () => app.getVersion())
 
   ipcMain.handle('download-update', async () => {
     try {

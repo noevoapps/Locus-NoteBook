@@ -41,6 +41,7 @@ declare global {
       runSummary: (payload: { text: string; noteId?: string; folderId?: string }) => Promise<string>
       exportAudioAsWav: (dataUrl: string) => Promise<{ success: boolean; error?: string; canceled?: boolean }>
       onDownloadProgress: (callback: (percent: number) => void) => () => void
+      getAppVersion: () => Promise<string>
       checkForUpdates: () => Promise<{
         success: boolean
         error?: string
