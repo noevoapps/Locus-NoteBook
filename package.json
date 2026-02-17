@@ -1,6 +1,6 @@
 {
   "name": "locus",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "description": "Locus - Local note-taker with AI transcription and summarization",
   "main": "./out/main/index.js",
   "author": "example.com",
