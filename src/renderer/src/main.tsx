@@ -10,7 +10,7 @@ import App from './App'
 import { ErrorBoundary } from './ErrorBoundary'
 
 const SENTRY_DSN =
-  'https://5fae01abe192da9057d224c5fe7f494d@o4510830153433088.ingest.us.sentry.io/4510830313406464'
+  'https://95be6fe73d23d7158ed1ad18a8ab679a@o4510869943681024.ingest.us.sentry.io/4510869956657152'
 
 let shareAnalytics = true
 window.api?.getPrivacySettings?.().then((s) => {

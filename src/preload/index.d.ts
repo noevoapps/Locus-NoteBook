@@ -31,8 +31,27 @@ declare global {
       toggleAnalytics: () => Promise<{ shareAnalytics: boolean }>
       sendSentryTestEvent: () => Promise<{ sent: boolean }>
       checkAiStatus: () => Promise<{ ready: boolean }>
-      downloadAiModel: () => Promise<{ success: boolean }>
+      listAiModels: () => Promise<{
+        models: { id: string; name: string; filename: string; sizeGb: string }[]
+        downloaded: string[]
+      }>
+      getSelectedAiModel: () => Promise<{ id: string; name: string; filename: string; sizeGb: string }>
+      setSelectedAiModel: (modelId: string) => Promise<boolean>
+      downloadAiModel: (modelId: string) => Promise<{ success: boolean }>
+      runSummary: (payload: { text: string; noteId?: string; folderId?: string }) => Promise<string>
+      exportAudioAsWav: (dataUrl: string) => Promise<{ success: boolean; error?: string; canceled?: boolean }>
       onDownloadProgress: (callback: (percent: number) => void) => () => void
+      checkForUpdates: () => Promise<{
+        success: boolean
+        error?: string
+        updateInfo?: { version: string; releaseNotes: unknown | null } | null
+      }>
+      downloadUpdate: () => Promise<{ success: boolean; error?: string }>
+      quitAndInstall: () => Promise<boolean>
+      onUpdateAvailable: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => () => void
+      onUpdateDownloaded: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => () => void
+      onUpdateDownloadProgress: (callback: (percent: number) => void) => () => void
+      onUpdateError: (callback: (message: string) => void) => () => void
     }
   }
 }

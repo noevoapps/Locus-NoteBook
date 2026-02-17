@@ -6,7 +6,52 @@ const api = {
   platform: process.platform as string,
   transcribe: (buffer: ArrayBuffer) => ipcRenderer.invoke('transcribe-audio', buffer),
   checkAiStatus: () => ipcRenderer.invoke('check-ai-status') as Promise<{ ready: boolean }>,
-  downloadAiModel: () => ipcRenderer.invoke('download-ai-model') as Promise<{ success: boolean }>,
+  listAiModels: () =>
+    ipcRenderer.invoke('list-ai-models') as Promise<{
+      models: { id: string; name: string; filename: string; sizeGb: string }[]
+      downloaded: string[]
+    }>,
+  getSelectedAiModel: () =>
+    ipcRenderer.invoke('get-selected-ai-model') as Promise<{ id: string; name: string; filename: string; sizeGb: string }>,
+  setSelectedAiModel: (modelId: string) =>
+    ipcRenderer.invoke('set-selected-ai-model', modelId) as Promise<boolean>,
+  downloadAiModel: (modelId: string) =>
+    ipcRenderer.invoke('download-ai-model', modelId) as Promise<{ success: boolean }>,
+  runSummary: (payload: { text: string; noteId?: string; folderId?: string }) =>
+    ipcRenderer.invoke('run-summary', payload) as Promise<string>,
+  exportAudioAsWav: (dataUrl: string) =>
+    ipcRenderer.invoke('export-audio-as-wav', dataUrl) as Promise<{ success: boolean; error?: string; canceled?: boolean }>,
+  checkForUpdates: () =>
+    ipcRenderer.invoke('check-for-updates') as Promise<{
+      success: boolean
+      error?: string
+      updateInfo?: { version: string; releaseNotes: unknown | null } | null
+    }>,
+  downloadUpdate: () =>
+    ipcRenderer.invoke('download-update') as Promise<{ success: boolean; error?: string }>,
+  quitAndInstall: () => ipcRenderer.invoke('quit-and-install') as Promise<boolean>,
+  onUpdateAvailable: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => {
+    const fn = (_: unknown, info: { version: string; releaseNotes: unknown | null }) =>
+      callback(info)
+    ipcRenderer.on('update-available', fn)
+    return () => ipcRenderer.removeListener('update-available', fn)
+  },
+  onUpdateDownloaded: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => {
+    const fn = (_: unknown, info: { version: string; releaseNotes: unknown | null }) =>
+      callback(info)
+    ipcRenderer.on('update-downloaded', fn)
+    return () => ipcRenderer.removeListener('update-downloaded', fn)
+  },
+  onUpdateDownloadProgress: (callback: (percent: number) => void) => {
+    const fn = (_: unknown, percent: number) => callback(percent)
+    ipcRenderer.on('update-download-progress', fn)
+    return () => ipcRenderer.removeListener('update-download-progress', fn)
+  },
+  onUpdateError: (callback: (message: string) => void) => {
+    const fn = (_: unknown, message: string) => callback(message)
+    ipcRenderer.on('update-error', fn)
+    return () => ipcRenderer.removeListener('update-error', fn)
+  },
   onDownloadProgress: (callback: (percent: number) => void) => {
     const fn = (_: unknown, percent: number) => callback(percent)
     ipcRenderer.on('download-progress', fn)

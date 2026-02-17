@@ -6,9 +6,18 @@ type AiDownloadModalProps = {
   opened: boolean
   onClose: () => void
   onDownloadComplete: () => void
+  /** Model to download; if not set, uses the currently selected model. */
+  modelId?: string
+  modelName?: string
 }
 
-export function AiDownloadModal({ opened, onClose, onDownloadComplete }: AiDownloadModalProps) {
+export function AiDownloadModal({
+  opened,
+  onClose,
+  onDownloadComplete,
+  modelId,
+  modelName
+}: AiDownloadModalProps) {
   const [isDownloading, setIsDownloading] = useState(false)
   const [progress, setProgress] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -27,7 +36,8 @@ export function AiDownloadModal({ opened, onClose, onDownloadComplete }: AiDownl
     setIsDownloading(true)
     setProgress(0)
     try {
-      await window.api.downloadAiModel()
+      const id = modelId ?? (await window.api.getSelectedAiModel?.())?.id ?? 'llama-3-8b'
+      await window.api.downloadAiModel(id)
       onDownloadComplete()
       onClose()
     } catch (err) {
@@ -64,7 +74,9 @@ export function AiDownloadModal({ opened, onClose, onDownloadComplete }: AiDownl
     >
       <div className="space-y-4">
         <p className="text-foreground text-sm">
-          To use Smart Summaries, we need to download the AI Brain (~4GB). This only happens once.
+          {modelName
+            ? `Download "${modelName}" (~4–5GB) to use it for Smart Summaries.`
+            : 'To use Smart Summaries, we need to download the AI Brain (~4GB). This only happens once.'}
         </p>
 
         {isDownloading && (

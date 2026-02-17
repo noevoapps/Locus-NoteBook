@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { writeFileSync, unlinkSync, existsSync, readdirSync, readFileSync, mkdirSync, renameSync, rmSync, createWriteStream } from 'fs'
 import { spawn } from 'child_process'
@@ -7,12 +7,13 @@ import icon from '../../resources/icon.png?asset'
 import { privacyStore } from './store'
 import * as Sentry from '@sentry/electron/main'
 import { initialize as aptabaseInitialize, trackEvent as aptabaseTrackEvent } from '@aptabase/electron/main'
+import { autoUpdater } from 'electron-updater'
 
 const isWindows = process.platform === 'win32'
 
 // Privacy-first crash reporting: only send if user opted in
 Sentry.init({
-  dsn: process.env.SENTRY_DSN || 'https://5fae01abe192da9057d224c5fe7f494d@o4510830153433088.ingest.us.sentry.io/4510830313406464',
+  dsn: process.env.SENTRY_DSN || 'https://95be6fe73d23d7158ed1ad18a8ab679a@o4510869943681024.ingest.us.sentry.io/4510869956657152',
   beforeSend(event) {
     if (!privacyStore.get('shareAnalytics')) return null
     return event
@@ -132,6 +133,91 @@ app.whenReady().then(async () => {
     const next = !privacyStore.get('shareAnalytics')
     privacyStore.set('shareAnalytics', next)
     return { shareAnalytics: next }
+  })
+
+  // --- Auto-updates via GitHub Releases ---
+  try {
+    // Do not download automatically; wait for user confirmation from the renderer.
+    autoUpdater.autoDownload = false
+    // Safe default: install on quit after download completes.
+    autoUpdater.autoInstallOnAppQuit = true
+  } catch (err) {
+    console.error('Failed to configure autoUpdater:', err)
+  }
+
+  autoUpdater.on('error', (error) => {
+    console.error('Auto-update error:', error)
+    if (mainWindowRef) {
+      const message =
+        error instanceof Error ? error.message : error ? String(error) : 'Unknown update error'
+      mainWindowRef.webContents.send('update-error', message)
+    }
+  })
+
+  autoUpdater.on('update-available', (info) => {
+    if (mainWindowRef) {
+      mainWindowRef.webContents.send('update-available', {
+        version: info.version,
+        releaseNotes: info.releaseNotes ?? null
+      })
+    }
+  })
+
+  autoUpdater.on('update-not-available', () => {
+    if (mainWindowRef) {
+      mainWindowRef.webContents.send('update-not-available')
+    }
+  })
+
+  autoUpdater.on('download-progress', (progress) => {
+    if (mainWindowRef) {
+      // progress.percent may be fractional; normalize to 0–100 integer.
+      const percent = Math.round(progress.percent ?? 0)
+      mainWindowRef.webContents.send('update-download-progress', percent)
+    }
+  })
+
+  autoUpdater.on('update-downloaded', (info) => {
+    if (mainWindowRef) {
+      mainWindowRef.webContents.send('update-downloaded', {
+        version: info.version,
+        releaseNotes: info.releaseNotes ?? null
+      })
+    }
+  })
+
+  ipcMain.handle('check-for-updates', async () => {
+    try {
+      const result = await autoUpdater.checkForUpdates()
+      const info = result?.updateInfo
+      return {
+        success: true,
+        updateInfo: info
+          ? { version: info.version, releaseNotes: info.releaseNotes ?? null }
+          : null
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error('check-for-updates failed:', err)
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('download-update', async () => {
+    try {
+      await autoUpdater.downloadUpdate()
+      return { success: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.error('download-update failed:', err)
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle('quit-and-install', () => {
+    // This will close the app and install the downloaded update.
+    autoUpdater.quitAndInstall()
+    return true
   })
   ipcMain.handle('sentry-test-event', () => {
     if (!privacyStore.get('shareAnalytics')) return { sent: false }
@@ -408,24 +494,127 @@ app.whenReady().then(async () => {
     }
   })
 
-  // AI Model Manager - check if GGUF model exists
-  const AI_MODEL_FILENAME = 'Meta-Llama-3-8B-Instruct-Q4_K_M.gguf'
-  const AI_MODEL_URL =
-    'https://huggingface.co/lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf'
+  // Export embedded audio (e.g. data:audio/webm;base64,...) as WAV file via ffmpeg
+  ipcMain.handle('export-audio-as-wav', async (_event, dataUrl: string) => {
+    if (!dataUrl || typeof dataUrl !== 'string' || !dataUrl.startsWith('data:audio/')) {
+      return { success: false, error: 'Not an audio data URL' }
+    }
+    const match = dataUrl.match(/^data:audio\/[^;]+;base64,(.+)$/)
+    if (!match) return { success: false, error: 'Invalid audio data URL' }
+    const tempDir = app.getPath('temp')
+    const ts = Date.now()
+    const webmPath = join(tempDir, `export-audio-${ts}.webm`)
+    const wavPath = join(tempDir, `export-audio-${ts}.wav`)
+    try {
+      const buf = Buffer.from(match[1], 'base64')
+      writeFileSync(webmPath, buf)
+      const ffmpegOk = await new Promise<boolean>((resolve) => {
+        const ff = spawn('ffmpeg', ['-y', '-i', webmPath, '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', wavPath], {
+          stdio: 'ignore'
+        })
+        ff.on('close', (code) => resolve(code === 0))
+        ff.on('error', () => resolve(false))
+      })
+      if (!ffmpegOk || !existsSync(wavPath)) {
+        return { success: false, error: 'Failed to convert audio to WAV' }
+      }
+      const { canceled, filePath } = await dialog.showSaveDialog({
+        defaultPath: 'recording.wav',
+        filters: [{ name: 'WAV audio', extensions: ['wav'] }]
+      })
+      if (canceled || !filePath) return { success: false, canceled: true }
+      const wavData = readFileSync(wavPath)
+      writeFileSync(filePath, wavData)
+      return { success: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { success: false, error: message }
+    } finally {
+      for (const p of [webmPath, wavPath]) {
+        if (existsSync(p)) {
+          try {
+            unlinkSync(p)
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+  })
+
+  // AI Model Manager - multiple GGUF models (sizeGb = approximate download size)
+  const AI_MODELS: { id: string; name: string; filename: string; url: string; sizeGb: string }[] = [
+    {
+      id: 'llama-3-8b',
+      name: 'Llama 3 8B Instruct',
+      filename: 'Meta-Llama-3-8B-Instruct-Q4_K_M.gguf',
+      url: 'https://huggingface.co/lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF/resolve/main/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf',
+      sizeGb: '4.9'
+    },
+    {
+      id: 'mistral-7b',
+      name: 'Mistral 7B Instruct',
+      filename: 'Mistral-7B-Instruct-v0.3-Q4_K_M.gguf',
+      url: 'https://huggingface.co/lmstudio-community/Mistral-7B-Instruct-v0.3-GGUF/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf',
+      sizeGb: '4.4'
+    },
+    {
+      id: 'qwen2.5-7b',
+      name: 'Qwen2.5 7B Instruct',
+      filename: 'Qwen2.5-7B-Instruct-Q4_K_M.gguf',
+      url: 'https://huggingface.co/lmstudio-community/Qwen2.5-7B-Instruct-GGUF/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf',
+      sizeGb: '4.7'
+    }
+  ]
+
+  const SELECTED_AI_MODEL_KEY = 'selectedAiModelId'
+
+  const getSelectedModelFilename = (): string => {
+    const id = loadSettings()[SELECTED_AI_MODEL_KEY] as string | undefined
+    const model = AI_MODELS.find((m) => m.id === id) ?? AI_MODELS[0]
+    return model.filename
+  }
+
+  ipcMain.handle('list-ai-models', () => {
+    const modelsDir = join(app.getPath('userData'), 'models')
+    const downloaded = existsSync(modelsDir)
+      ? readdirSync(modelsDir).filter((f) => f.endsWith('.gguf'))
+      : []
+    return {
+      models: AI_MODELS.map((m) => ({ id: m.id, name: m.name, filename: m.filename, sizeGb: m.sizeGb })),
+      downloaded
+    }
+  })
+
+  ipcMain.handle('get-selected-ai-model', () => {
+    const id = loadSettings()[SELECTED_AI_MODEL_KEY] as string | undefined
+    const model = AI_MODELS.find((m) => m.id === id) ?? AI_MODELS[0]
+    return { id: model.id, name: model.name, filename: model.filename, sizeGb: model.sizeGb }
+  })
+
+  ipcMain.handle('set-selected-ai-model', (_event, modelId: string) => {
+    if (!AI_MODELS.some((m) => m.id === modelId)) return false
+    const settings = loadSettings()
+    settings[SELECTED_AI_MODEL_KEY] = modelId
+    saveSettings(settings)
+    return true
+  })
 
   ipcMain.handle('check-ai-status', () => {
     const modelsDir = join(app.getPath('userData'), 'models')
-    const modelPath = join(modelsDir, AI_MODEL_FILENAME)
+    const filename = getSelectedModelFilename()
+    const modelPath = join(modelsDir, filename)
     return { ready: existsSync(modelPath) }
   })
 
-  ipcMain.handle('download-ai-model', async () => {
+  ipcMain.handle('download-ai-model', async (_event, modelId: string) => {
+    const model = AI_MODELS.find((m) => m.id === modelId) ?? AI_MODELS[0]
     const modelsDir = join(app.getPath('userData'), 'models')
     if (!existsSync(modelsDir)) mkdirSync(modelsDir, { recursive: true })
-    const modelPath = join(modelsDir, AI_MODEL_FILENAME)
+    const modelPath = join(modelsDir, model.filename)
     if (existsSync(modelPath)) return { success: true }
 
-    const res = await fetch(AI_MODEL_URL, { redirect: 'follow' })
+    const res = await fetch(model.url, { redirect: 'follow' })
     if (!res.ok) throw new Error(`Download failed: ${res.status} ${res.statusText}`)
     const contentLength = res.headers.get('content-length')
     const totalBytes = contentLength ? parseInt(contentLength, 10) : 0
@@ -459,23 +648,146 @@ app.whenReady().then(async () => {
   })
 
   // Summarize using node-llama-cpp (embedded GGUF model)
-  ipcMain.handle('run-summary', async (_event, text: string) => {
+  // Safe limits to prevent OOM/crash on long text: cap context size and input length
+  const SUMMARY_CONTEXT_SIZE = 4096
+  const SUMMARY_MAX_INPUT_CHARS = 12_000
+  const SUMMARY_MAX_TOKENS = 1024
+
+  // Extract plain text from BlockNote JSON (saved note content) for summarization
+  const blockNoteContentToText = (contentJson: string): string => {
+    try {
+      const parsed = JSON.parse(contentJson)
+      if (!Array.isArray(parsed)) return contentJson.trim()
+      const blocks = parsed as Array<{ content?: string | Array<{ type?: string; text?: string }>; children?: unknown[] }>
+      const parts: string[] = []
+      for (const block of blocks) {
+        if (block.content == null) continue
+        if (typeof block.content === 'string') {
+          parts.push(block.content)
+          continue
+        }
+        if (Array.isArray(block.content)) {
+          const text = block.content
+            .map((c) => (c && typeof c === 'object' && 'text' in c ? String((c as { text: string }).text) : ''))
+            .join('')
+          if (text) parts.push(text)
+        }
+      }
+      return parts.length > 0 ? parts.join('\n\n') : contentJson.trim()
+    } catch {
+      return contentJson.trim()
+    }
+  }
+
+  ipcMain.handle('run-summary', async (_event, payload: unknown) => {
+    // --- DEBUG: what we received ---
+    console.log('[run-summary] payload type:', typeof payload)
+    if (payload != null && typeof payload === 'object') {
+      const p = payload as Record<string, unknown>
+      console.log('[run-summary] payload keys:', Object.keys(p))
+      console.log('[run-summary] payload.text type:', typeof p.text, 'length:', typeof p.text === 'string' ? (p.text as string).length : 'N/A')
+      console.log('[run-summary] payload.noteId:', p.noteId)
+      console.log('[run-summary] payload.folderId:', p.folderId)
+    }
+
+    let textToSummarize = ''
+    let source = 'none'
+    if (payload != null && typeof payload === 'object' && 'text' in payload && typeof (payload as { text: unknown }).text === 'string') {
+      textToSummarize = ((payload as { text: string }).text || '').trim()
+      source = 'payload.text'
+    }
+    if (!textToSummarize && payload != null && typeof payload === 'object' && 'noteId' in payload) {
+      const { noteId, folderId } = payload as { noteId?: string; folderId?: string }
+      if (noteId) {
+        const base = getNotesFolder()
+        const dir = folderId ? join(base, folderId) : base
+        const path = join(dir, `${noteId}.json`)
+        if (existsSync(path)) {
+          const note = JSON.parse(readFileSync(path, 'utf-8')) as { content?: string }
+          if (note?.content) {
+            textToSummarize = blockNoteContentToText(note.content).trim()
+            source = 'disk'
+          }
+        }
+      }
+    }
+
+    // Strip any remaining data: URLs (audio/image) so prompt is text-only
+    textToSummarize = textToSummarize
+      .replace(/\[\]\(data:audio\/[^)]+\)/g, '[Audio recording]')
+      .replace(/\[\]\(data:image\/[^)]+\)/g, '[Image]')
+      .replace(/!\[[^\]]*\]\(data:[^)]+\)/g, '[Image]')
+      .replace(/data:audio\/[^,\s)]+/g, '[Audio]')
+      .replace(/data:image\/[^,\s)]+/g, '[Image]')
+
+    console.log('[run-summary] textToSummarize source:', source, 'length:', textToSummarize.length)
+    console.log('[run-summary] textToSummarize preview (first 400 chars):', JSON.stringify(textToSummarize.slice(0, 400)))
+    console.log('[run-summary] textToSummarize preview (last 200 chars):', JSON.stringify(textToSummarize.slice(-200)))
+
+    if (!textToSummarize) {
+      throw new Error('No content to summarize. Add some text to your note first.')
+    }
+
     const modelsDir = join(app.getPath('userData'), 'models')
-    const modelPath = join(modelsDir, AI_MODEL_FILENAME)
+    const filename = getSelectedModelFilename()
+    const modelPath = join(modelsDir, filename)
     if (!existsSync(modelPath)) {
       throw new Error('AI model not found. Download it first via the AI Summarize flow.')
     }
 
+    const trimmedForPrompt =
+      textToSummarize.length > SUMMARY_MAX_INPUT_CHARS
+        ? textToSummarize.slice(0, SUMMARY_MAX_INPUT_CHARS) + '\n\n[... text truncated for summary ...]'
+        : textToSummarize
+
+    const prompt = `Summarize this text and structure it with clear sections. Return ONLY valid Markdown, no preamble or explanation:
+- Use "# " for the main title (one line).
+- Use "## " for section headings.
+- Use "### " for subheadings if needed.
+- Use normal paragraphs under each heading.
+- Use blank lines between paragraphs and after headings.
+
+Text to summarize:
+
+${trimmedForPrompt}`
+
+    console.log('[run-summary] prompt length:', prompt.length)
+    console.log('[run-summary] --- FULL PROMPT SENT TO MODEL ---')
+    console.log(prompt)
+    console.log('[run-summary] --- END FULL PROMPT ---')
+
     const { getLlama, LlamaChatSession } = await import('node-llama-cpp')
     const llama = await getLlama()
     const model = await llama.loadModel({ modelPath })
-    const context = await model.createContext()
-    const session = new LlamaChatSession({ contextSequence: context.getSequence() })
+    let context: Awaited<ReturnType<typeof model.createContext>> | null = null
+    let session: InstanceType<typeof LlamaChatSession> | null = null
 
-    const prompt = `Summarize this text concisely. Return only the summary, no preamble:\n\n${text}`
-    const summary = await session.prompt(prompt)
-    trackEvent('summary_used')
-    return summary?.trim() ?? ''
+    try {
+      context = await model.createContext({
+        contextSize: SUMMARY_CONTEXT_SIZE
+      })
+      session = new LlamaChatSession({ contextSequence: context.getSequence() })
+
+      const summary = await session.prompt(prompt, { maxTokens: SUMMARY_MAX_TOKENS })
+      trackEvent('summary_used')
+      return summary?.trim() ?? ''
+    } finally {
+      try {
+        if (session && !session.disposed) session.dispose()
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (context && !context.disposed) await context.dispose()
+      } catch {
+        /* ignore */
+      }
+      try {
+        if (model && !model.disposed) await model.dispose()
+      } catch {
+        /* ignore */
+      }
+    }
   })
 
   createWindow()

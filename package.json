@@ -1,10 +1,34 @@
 {
   "name": "locus",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Locus - Local note-taker with AI transcription and summarization",
   "main": "./out/main/index.js",
   "author": "example.com",
   "homepage": "https://github.com/noevoapps/Locus-NoteBook",
+  "build": {
+    "appId": "com.noevoapps.locus",
+    "productName": "Locus",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*",
+      "python_backend/dist/**/transcriber*"
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "noevoapps",
+        "repo": "Locus-NoteBook"
+      }
+    ]
+  },
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
@@ -22,6 +46,7 @@
     "build:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
+    "electron-updater": "^6.7.3",
     "@aptabase/electron": "^0.3.1",
     "@blocknote/code-block": "^0.46.2",
     "@blocknote/core": "^0.46.2",

@@ -20,6 +20,9 @@ import {
   Play,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  Check,
+  Download,
   FolderPlus,
   FileText,
   Pencil,
@@ -29,7 +32,6 @@ import {
   ClipboardPaste,
   ClipboardType,
   SquareDashed,
-  Check,
   X,
   Plus,
   Palette,
@@ -372,14 +374,16 @@ function tabKey(tab: OpenTab): string {
   return tab.folderId ? `${tab.folderId}/${tab.id}` : tab.id
 }
 
-function cn(...inputs: (string | undefined)[]) {
+function cn(...inputs: (string | false | null | undefined)[]) {
   return twMerge(clsx(inputs))
 }
 
-async function runSummary(text: string): Promise<string> {
-  const invoke = window.electron?.ipcRenderer?.invoke
-  if (invoke) {
-    return invoke('run-summary', text)
+async function runSummary(payload: { text: string; noteId?: string; folderId?: string }): Promise<string> {
+  if (window.api?.runSummary) {
+    return window.api.runSummary(payload)
+  }
+  if (window.electron?.ipcRenderer?.invoke) {
+    return window.electron.ipcRenderer.invoke('run-summary', payload)
   }
   throw new Error('AI summary not available')
 }
@@ -405,6 +409,7 @@ export default function App(): React.JSX.Element {
   const [title, setTitle] = useState('Untitled Note')
   const [isTranscribing, setIsTranscribing] = useState(false)
   const [isSummarizing, setIsSummarizing] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [folderModal, setFolderModal] = useState<'create' | 'rename' | null>(null)
   const [folderModalName, setFolderModalName] = useState('')
@@ -416,15 +421,30 @@ export default function App(): React.JSX.Element {
   const [noteContextMenu, setNoteContextMenu] = useState<{ id: string; folderId?: string; x: number; y: number } | null>(null)
   const [deleteNoteTarget, setDeleteNoteTarget] = useState<{ id: string; folderId?: string } | null>(null)
   const [aiDownloadModalOpen, setAiDownloadModalOpen] = useState(false)
+  const [aiDownloadModalContext, setAiDownloadModalContext] = useState<'summarize' | { modelId: string; modelName: string } | null>(null)
+  const [aiModelsList, setAiModelsList] = useState<{
+    models: { id: string; name: string; filename: string; sizeGb: string }[]
+    downloaded: string[]
+  } | null>(null)
+  const [selectedAiModel, setSelectedAiModel] = useState<{ id: string; name: string; filename: string; sizeGb: string } | null>(null)
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
+  const aiModelDropdownRef = useRef<HTMLDivElement>(null)
   const [savedIndicator, setSavedIndicator] = useState(false)
-  const [editorContextMenu, setEditorContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [editorContextMenu, setEditorContextMenu] = useState<{ x: number; y: number; audioUrl?: string } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const noteContextMenuRef = useRef<HTMLDivElement>(null)
   const editorContextMenuRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const codeBlockSelectInteractingRef = useRef(false)
   const isMountedRef = useRef(true)
+  const [updateModalOpen, setUpdateModalOpen] = useState(false)
+  const [updateVersion, setUpdateVersion] = useState<string | null>(null)
+  const [updateReleaseNotes, setUpdateReleaseNotes] = useState<unknown | null>(null)
+  const [updateStatus, setUpdateStatus] = useState<
+    'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'error'
+  >('idle')
+  const [updateProgress, setUpdateProgress] = useState(0)
+  const [updateError, setUpdateError] = useState<string | null>(null)
 
   const { theme } = useTheme()
 
@@ -432,6 +452,69 @@ export default function App(): React.JSX.Element {
     isMountedRef.current = true
     return () => {
       isMountedRef.current = false
+    }
+  }, [])
+
+  // Auto-update: subscribe to update events from main process and trigger a check on startup.
+  useEffect(() => {
+    if (!window.api) return
+
+    const unsubAvailable = window.api.onUpdateAvailable?.((info) => {
+      setUpdateVersion(info.version)
+      setUpdateReleaseNotes(info.releaseNotes ?? null)
+      setUpdateStatus('available')
+      setUpdateModalOpen(true)
+    })
+    const unsubDownloaded = window.api.onUpdateDownloaded?.((info) => {
+      setUpdateVersion(info.version)
+      setUpdateReleaseNotes(info.releaseNotes ?? null)
+      setUpdateStatus('downloaded')
+      setUpdateModalOpen(true)
+    })
+    const unsubProgress = window.api.onUpdateDownloadProgress?.((percent) => {
+      setUpdateProgress(percent)
+      setUpdateStatus('downloading')
+    })
+    const unsubError = window.api.onUpdateError?.((message) => {
+      setUpdateError(message)
+      setUpdateStatus('error')
+      setUpdateModalOpen(true)
+    })
+
+    // Kick off a background check shortly after startup.
+    setUpdateStatus('checking')
+    window.api
+      .checkForUpdates()
+      .then((result) => {
+        if (!result?.success) {
+          if (result?.error) {
+            setUpdateError(result.error)
+            setUpdateStatus('error')
+          } else {
+            setUpdateStatus('idle')
+          }
+          return
+        }
+        if (result.updateInfo) {
+          setUpdateVersion(result.updateInfo.version)
+          setUpdateReleaseNotes(result.updateInfo.releaseNotes ?? null)
+          setUpdateStatus('available')
+          setUpdateModalOpen(true)
+        } else {
+          setUpdateStatus('idle')
+        }
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err)
+        setUpdateError(message)
+        setUpdateStatus('error')
+      })
+
+    return () => {
+      unsubAvailable?.()
+      unsubDownloaded?.()
+      unsubProgress?.()
+      unsubError?.()
     }
   }, [])
 
@@ -522,6 +605,25 @@ export default function App(): React.JSX.Element {
       }
     }
   }, [notesData, openTabs.length])
+
+  const loadAiModelsAndSelected = useCallback(async () => {
+    try {
+      const list = await window.api?.listAiModels?.()
+      const selected = await window.api?.getSelectedAiModel?.()
+      if (list) setAiModelsList(list)
+      if (selected) setSelectedAiModel(selected)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    loadAiModelsAndSelected()
+  }, [loadAiModelsAndSelected])
+
+  useEffect(() => {
+    if (!aiDownloadModalOpen) loadAiModelsAndSelected()
+  }, [aiDownloadModalOpen, loadAiModelsAndSelected])
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -999,40 +1101,77 @@ export default function App(): React.JSX.Element {
     }
   }, [isRecording, stopRecording, startRecording, blobToArrayBuffer, blobToDataUrl, editor])
 
-  const handleSummarize = useCallback(async () => {
+  const handleSummarize = useCallback(() => {
     if (!editor) return
-    const markdown = editor.blocksToMarkdownLossy(editor.document)
-    if (!markdown.trim()) return
-
-    try {
-      const status = await window.api?.checkAiStatus?.()
-      if (!status?.ready) {
-        setAiDownloadModalOpen(true)
-        return
-      }
-
-      setIsSummarizing(true)
-      const summary = await runSummary(markdown)
-      if (summary) {
-        const doc = editor.document
-        const refBlock = doc[doc.length - 1]
-        if (refBlock) {
-          editor.insertBlocks(
-            [
-              { type: 'heading', content: 'Summary', props: { level: 2 } },
-              { type: 'paragraph', content: summary }
-            ],
-            refBlock,
-            'after'
-          )
-        }
-      }
-    } catch (err) {
-      console.error('Summarization failed:', err)
-    } finally {
-      setIsSummarizing(false)
+    setSummaryError(null)
+    let markdown = editor.blocksToMarkdownLossy(editor.document)
+    // Strip embedded audio/image data URLs so we don't send 80MB+ base64 to the model
+    markdown = markdown.replace(/\[\]\(data:audio\/[^)]+\)/g, '[Audio recording]')
+    markdown = markdown.replace(/\[\]\(data:image\/[^)]+\)/g, '[Image]')
+    markdown = markdown.replace(/!\[[^\]]*\]\(data:[^)]+\)/g, '[Image]')
+    const hasContent = markdown.trim().length > 0
+    if (!hasContent) {
+      setSummaryError('No content to summarize. Add some text to your note first.')
+      return
     }
-  }, [editor])
+
+    const doSummarize = async () => {
+      try {
+        const status = await window.api?.checkAiStatus?.()
+        if (!status?.ready) {
+          setAiDownloadModalContext('summarize')
+          setAiDownloadModalOpen(true)
+          return
+        }
+
+        // Show "Summarizing..." immediately so UI updates before heavy work
+        setIsSummarizing(true)
+
+        // Defer heavy work to next tick so the button can paint "Summarizing..." first
+        await new Promise((r) => setTimeout(r, 0))
+
+        // Save current note so main process can load from disk if IPC text is missing
+        if (selectedNoteId && window.electron?.ipcRenderer?.invoke) {
+          const content = JSON.stringify(editor.document)
+          await window.electron.ipcRenderer.invoke('notes-save', {
+            id: selectedNoteId,
+            title,
+            content,
+            folderId: selectedFolderId
+          })
+        }
+
+        const summary = await runSummary({
+          text: markdown,
+          noteId: selectedNoteId ?? undefined,
+          folderId: selectedFolderId
+        })
+        if (summary) {
+          const doc = editor.document
+          const refBlock = doc[doc.length - 1]
+          if (refBlock) {
+            const summaryBlocks = editor.tryParseMarkdownToBlocks(summary.trim())
+            const blocksToInsert =
+              summaryBlocks.length > 0
+                ? [{ type: 'heading' as const, content: 'Summary', props: { level: 2 } }, ...summaryBlocks]
+                : [
+                    { type: 'heading' as const, content: 'Summary', props: { level: 2 } },
+                    { type: 'paragraph' as const, content: summary }
+                  ]
+            editor.insertBlocks(blocksToInsert, refBlock, 'after')
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Summarization failed'
+        console.error('Summarization failed:', err)
+        setSummaryError(message)
+      } finally {
+        setIsSummarizing(false)
+      }
+    }
+
+    doSummarize()
+  }, [editor, selectedNoteId, selectedFolderId, title])
 
   const totalNotes =
     notesData.rootNotes.length + Object.values(notesData.folderNotes).reduce((s, n) => s + n.length, 0)
@@ -1409,14 +1548,68 @@ export default function App(): React.JSX.Element {
               )}
             </div>
 
-            <button
-              onClick={handleSummarize}
-              disabled={isSummarizing}
-              className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium bg-primary hover:bg-primary/90 text-white disabled:opacity-50 transition-colors"
-            >
-              <Sparkles className="w-4 h-4" />
-              {isSummarizing ? 'Summarizing...' : 'AI Summarize'}
-            </button>
+            <div className="flex flex-col items-end gap-1">
+              <div className="flex items-center gap-0" ref={aiModelDropdownRef}>
+                <button
+                  onClick={handleSummarize}
+                  disabled={isSummarizing}
+                  className="flex items-center gap-2 px-4 py-2 rounded-l-lg font-medium bg-primary hover:bg-primary/90 text-white disabled:opacity-50 transition-colors"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  {isSummarizing ? 'Summarizing...' : 'AI Summarize'}
+                </button>
+                <Menu position="bottom-end" shadow="md" width={220}>
+                  <Menu.Target>
+                    <button
+                      type="button"
+                      className="flex items-center gap-1 px-2 py-2 rounded-r-lg font-medium bg-primary hover:bg-primary/90 text-white transition-colors border-l border-white/20"
+                      title="Choose AI model"
+                    >
+                      <ChevronDown className="w-4 h-4" />
+                    </button>
+                  </Menu.Target>
+                  <Menu.Dropdown className="bg-sidebar border border-border">
+                    {aiModelsList?.models.map((m) => {
+                      const downloaded = aiModelsList.downloaded.includes(m.filename)
+                      const isSelected = selectedAiModel?.id === m.id
+                      return (
+                        <Menu.Item
+                          key={m.id}
+                          leftSection={isSelected ? <Check className="w-4 h-4 text-primary" /> : <span className="w-4" />}
+                          rightSection={
+                            <span className="flex items-center gap-2">
+                              <span className="text-xs text-muted">{m.sizeGb} GB</span>
+                              {downloaded ? (
+                                <span className="text-xs text-muted">✓</span>
+                              ) : (
+                                <Download className="w-3.5 h-3.5 text-muted" />
+                              )}
+                            </span>
+                          }
+                          className={cn(!downloaded && 'text-muted')}
+                          onClick={async () => {
+                            if (downloaded) {
+                              await window.api?.setSelectedAiModel?.(m.id)
+                              setSelectedAiModel({ id: m.id, name: m.name, filename: m.filename, sizeGb: m.sizeGb })
+                            } else {
+                              setAiDownloadModalContext({ modelId: m.id, modelName: m.name })
+                              setAiDownloadModalOpen(true)
+                            }
+                          }}
+                        >
+                          {m.name}
+                        </Menu.Item>
+                      )
+                    })}
+                  </Menu.Dropdown>
+                </Menu>
+              </div>
+              {summaryError && (
+                <p className="text-sm text-red-500/90 max-w-md text-right" role="alert">
+                  {summaryError}
+                </p>
+              )}
+            </div>
           </header>
 
           <div
@@ -1424,7 +1617,23 @@ export default function App(): React.JSX.Element {
             className="flex-1 overflow-auto p-6 relative rounded-b-2xl"
             onContextMenu={(e) => {
               e.preventDefault()
-              setEditorContextMenu({ x: e.clientX, y: e.clientY })
+              let audioUrl: string | undefined
+              if (editor?.prosemirrorView && editorContainerRef.current) {
+                const elements = document.elementsFromPoint(e.clientX, e.clientY)
+                for (const el of elements) {
+                  if (editorContainerRef.current.contains(el) && el.getAttribute?.('data-node-type') === 'blockContainer') {
+                    const id = el.getAttribute('data-id')
+                    if (id) {
+                      const block = editor.getBlock(id)
+                      if (block?.type === 'audio' && block?.props?.url) {
+                        audioUrl = block.props.url as string
+                      }
+                    }
+                    break
+                  }
+                }
+              }
+              setEditorContextMenu({ x: e.clientX, y: e.clientY, audioUrl })
             }}
           >
             <BlockNoteView editor={editor} theme={blockNoteTheme} className="min-h-full" />
@@ -1567,6 +1776,29 @@ export default function App(): React.JSX.Element {
                   Paste as plain text
                 </button>
                 <div className="my-1.5 border-t border-border" />
+                {editorContextMenu.audioUrl && (
+                  <button
+                    className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
+                    onMouseDown={async (e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      const url = editorContextMenu.audioUrl
+                      setEditorContextMenu(null)
+                      if (!url || !window.api?.exportAudioAsWav) return
+                      try {
+                        const result = await window.api.exportAudioAsWav(url)
+                        if (!result.success && result.error && !result.canceled) {
+                          console.error('Export audio as WAV failed:', result.error)
+                        }
+                      } catch (err) {
+                        console.error('Export audio as WAV failed:', err)
+                      }
+                    }}
+                  >
+                    <Download className="w-4 h-4 text-muted flex-shrink-0" />
+                    Download as WAV
+                  </button>
+                )}
                 <button
                   className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
                   onMouseDown={(e) => {
@@ -1743,11 +1975,19 @@ export default function App(): React.JSX.Element {
       {/* AI Download Modal */}
       <AiDownloadModal
         opened={aiDownloadModalOpen}
-        onClose={() => setAiDownloadModalOpen(false)}
+        onClose={() => {
+          setAiDownloadModalOpen(false)
+          setAiDownloadModalContext(null)
+        }}
         onDownloadComplete={() => {
           setAiDownloadModalOpen(false)
-          handleSummarize()
+          const ctx = aiDownloadModalContext
+          setAiDownloadModalContext(null)
+          loadAiModelsAndSelected()
+          if (ctx === 'summarize') handleSummarize()
         }}
+        modelId={aiDownloadModalContext && typeof aiDownloadModalContext === 'object' ? aiDownloadModalContext.modelId : undefined}
+        modelName={aiDownloadModalContext && typeof aiDownloadModalContext === 'object' ? aiDownloadModalContext.modelName : selectedAiModel?.name}
       />
 
       {/* Change Folder Icon Color Modal */}
@@ -1778,6 +2018,100 @@ export default function App(): React.JSX.Element {
             onReset={() => setFolderMetadata(folderColorModal, { color: DEFAULT_ICON_COLOR })}
           />
         )}
+      </Modal>
+      {/* App Update Modal */}
+      <Modal
+        opened={updateModalOpen}
+        onClose={() => {
+          if (updateStatus === 'downloading') return
+          setUpdateModalOpen(false)
+          setUpdateError(null)
+        }}
+        title="Update available"
+        centered
+        withCloseButton={updateStatus !== 'downloading'}
+        closeOnClickOutside={updateStatus !== 'downloading'}
+        closeOnEscape={updateStatus !== 'downloading'}
+        zIndex={10000}
+        radius={20}
+        overlayProps={{ backgroundOpacity: 0.7, blur: 2 }}
+        classNames={{
+          inner: '!bg-sidebar',
+          content: '!bg-sidebar border border-border rounded-[20px] overflow-hidden',
+          header: '!bg-sidebar border-b border-border',
+          title: 'text-foreground',
+          body: '!bg-sidebar'
+        }}
+      >
+        <div className="space-y-3">
+          {updateStatus === 'available' && (
+            <>
+              <p className="text-foreground text-sm">
+                {updateVersion
+                  ? `A new version of Locus (${updateVersion}) is available.`
+                  : 'A new version of Locus is available.'}
+              </p>
+              {updateReleaseNotes && typeof updateReleaseNotes === 'string' && (
+                <div className="max-h-40 overflow-auto rounded-lg bg-[#27241f] border border-border p-2 text-xs text-muted whitespace-pre-wrap">
+                  {updateReleaseNotes}
+                </div>
+              )}
+            </>
+          )}
+          {updateStatus === 'downloading' && (
+            <p className="text-foreground text-sm">
+              Downloading update… {updateProgress}% (you can keep using the app).
+            </p>
+          )}
+          {updateStatus === 'downloaded' && (
+            <p className="text-foreground text-sm">
+              The update has been downloaded. Restart now to finish installing.
+            </p>
+          )}
+          {updateStatus === 'error' && updateError && (
+            <p className="text-red-500 text-sm">
+              Update error: {updateError}
+            </p>
+          )}
+          <div className="flex gap-2 mt-2">
+            {updateStatus === 'available' && (
+              <button
+                onClick={async () => {
+                  if (!window.api?.downloadUpdate) return
+                  setUpdateStatus('downloading')
+                  setUpdateProgress(0)
+                  setUpdateError(null)
+                  const result = await window.api.downloadUpdate()
+                  if (!result.success && result.error) {
+                    setUpdateError(result.error)
+                    setUpdateStatus('error')
+                  }
+                }}
+                className="px-4 py-2 rounded-lg bg-primary hover:bg-primary/90 text-white"
+              >
+                Download and Install
+              </button>
+            )}
+            {updateStatus === 'downloaded' && (
+              <button
+                onClick={() => {
+                  window.api?.quitAndInstall?.()
+                }}
+                className="px-4 py-2 rounded-lg bg-primary hover:bg-primary/90 text-white"
+              >
+                Restart Now
+              </button>
+            )}
+            {updateStatus !== 'downloading' && (
+              <button
+                onClick={() => setUpdateModalOpen(false)}
+                className="px-4 py-2 rounded-lg bg-border hover:bg-border/80 text-foreground"
+              >
+                Later
+              </button>
+            )}
+          </div>
+        </div>
       </Modal>
     </MantineProvider>
   )
