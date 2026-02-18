@@ -19,8 +19,9 @@ win:
     - from: python_backend/dist/transcriber.exe
       to: transcriber.exe
 nsis:
-  # Must match the filename on GitHub Releases exactly (no spaces) so electron-updater can download.
-  artifactName: ${productName}.Setup.${version}.${ext}
+  # electron-updater (GitHubProvider) replaces spaces with hyphens in the download URL.
+  # So the file must use hyphens (e.g. Locus-Setup-1.0.6.exe) to match the requested URL.
+  artifactName: ${productName}-Setup-${version}.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
