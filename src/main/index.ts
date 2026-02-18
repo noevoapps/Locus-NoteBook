@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, net } from 'electron'
 import { join } from 'path'
 import { writeFileSync, unlinkSync, existsSync, readdirSync, readFileSync, mkdirSync, renameSync, rmSync, createWriteStream } from 'fs'
 import { spawn } from 'child_process'
@@ -39,12 +39,12 @@ Sentry.init({
   }
 })
 
+const APTABASE_APP_KEY = process.env.APTABASE_KEY || 'A-US-6714554317'
+
 // Aptabase init promise: must be called before app is ready (we await inside whenReady before first event)
-const aptabaseInitPromise = aptabaseInitialize(process.env.APTABASE_KEY || 'A-US-6714554317').catch(
-  () => {
-    /* ignore */
-  }
-)
+const aptabaseInitPromise = aptabaseInitialize(APTABASE_APP_KEY).catch((err) => {
+  console.warn('Aptabase init failed (analytics disabled):', err instanceof Error ? err.message : err)
+})
 
 // Theme colors for title bar overlay (sidebar bg, symbol/icon color)
 const THEME_OVERLAY_COLORS: Record<string, { color: string; symbolColor: string }> = {
@@ -124,8 +124,8 @@ function createWindow(): void {
 // Privacy-first analytics: only send events if user opted in
 function trackEvent(eventName: string, props?: Record<string, string | number | boolean>): void {
   if (!privacyStore.get('shareAnalytics')) return
-  aptabaseTrackEvent(eventName, props).catch(() => {
-    /* ignore analytics errors */
+  aptabaseTrackEvent(eventName, props).catch((err) => {
+    console.warn('Aptabase trackEvent failed:', eventName, err instanceof Error ? err.message : err)
   })
 }
 
@@ -252,6 +252,56 @@ app.whenReady().then(async () => {
     Sentry.captureException(new Error('Locus test event (main process)'))
     return { sent: true }
   })
+
+  // Send a test event directly to Aptabase API so we can return real success/failure (key + network)
+  ipcMain.handle(
+    'aptabase-test-event',
+    (): Promise<{ success: boolean; error?: string }> =>
+      new Promise((resolve) => {
+        if (!privacyStore.get('shareAnalytics')) {
+          resolve({ success: false, error: 'Analytics is disabled. Turn on "Share anonymous crash reports & usage data".' })
+          return
+        }
+        const keyParts = APTABASE_APP_KEY.split('-')
+        const region = keyParts[1]
+        const baseUrl = region === 'US' ? 'https://us.aptabase.com' : region === 'EU' ? 'https://eu.aptabase.com' : null
+        if (!baseUrl) {
+          resolve({ success: false, error: 'Invalid Aptabase app key (expected A-US-... or A-EU-...).' })
+          return
+        }
+        const event = {
+          timestamp: new Date().toISOString(),
+          sessionId: `test-${Date.now()}`,
+          eventName: 'locus_test_event',
+          systemProps: {
+            appVersion: app.getVersion(),
+            isDebug: !app.isPackaged,
+            locale: app.getLocale(),
+            osName: process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux',
+            osVersion: '',
+            engineName: 'Chromium',
+            engineVersion: process.versions.chrome ?? '',
+            sdkVersion: 'aptabase-electron@0.3.1'
+          },
+          props: { source: 'settings_test' }
+        }
+        const req = net.request({
+          method: 'POST',
+          url: `${baseUrl}/api/v0/event`,
+          useSessionCookies: false
+        })
+        req.setHeader('Content-Type', 'application/json')
+        req.setHeader('App-Key', APTABASE_APP_KEY)
+        req.on('response', (res) => {
+          const status = res.statusCode ?? 0
+          if (status >= 200 && status < 300) resolve({ success: true })
+          else resolve({ success: false, error: `Server returned ${status}` })
+        })
+        req.on('error', (err) => resolve({ success: false, error: err?.message ?? 'Network error' }))
+        req.write(JSON.stringify(event))
+        req.end()
+      })
+  )
 
   // Ensure Aptabase is ready before first event so app_version is set correctly in the dashboard
   await aptabaseInitPromise

@@ -30,6 +30,7 @@ declare global {
       getPrivacySettings: () => Promise<{ shareAnalytics: boolean }>
       toggleAnalytics: () => Promise<{ shareAnalytics: boolean }>
       sendSentryTestEvent: () => Promise<{ sent: boolean }>
+      sendAptabaseTestEvent: () => Promise<{ success: boolean; error?: string }>
       checkAiStatus: () => Promise<{ ready: boolean }>
       listAiModels: () => Promise<{
         models: { id: string; name: string; filename: string; sizeGb: string }[]

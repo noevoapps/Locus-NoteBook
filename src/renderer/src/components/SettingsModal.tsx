@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Modal, Switch, Button } from '@mantine/core'
-import { Settings, Bug } from 'lucide-react'
+import { Settings, Bug, BarChart3 } from 'lucide-react'
 import * as Sentry from '@sentry/electron/renderer'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
@@ -27,7 +27,10 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
     })
   }, [opened])
   useEffect(() => {
-    if (!opened) setTestEventSent(false)
+    if (!opened) {
+      setTestEventSent(false)
+      setAptabaseTestResult(null)
+    }
   }, [opened])
 
   const handleToggleAnalytics = async () => {
@@ -49,6 +52,19 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
       setTestEventSent(true)
     } finally {
       setTestEventSending(false)
+    }
+  }
+
+  const [aptabaseTestSending, setAptabaseTestSending] = useState(false)
+  const [aptabaseTestResult, setAptabaseTestResult] = useState<{ success: boolean; error?: string } | null>(null)
+  const handleAptabaseTestEvent = async () => {
+    setAptabaseTestResult(null)
+    setAptabaseTestSending(true)
+    try {
+      const result = await window.api?.sendAptabaseTestEvent?.()
+      setAptabaseTestResult(result ?? { success: false, error: 'Not available' })
+    } finally {
+      setAptabaseTestSending(false)
     }
   }
 
@@ -89,16 +105,40 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
             }}
           />
           {shareAnalytics && (
-            <Button
-              variant="light"
-              size="xs"
-              leftSection={<Bug className="w-3.5 h-3.5" />}
-              loading={testEventSending}
-              onClick={handleSendTestEvent}
-              classNames={{ root: 'mt-2' }}
-            >
-              {testEventSent ? 'Test events sent' : 'Send test event to Sentry'}
-            </Button>
+            <div className="flex flex-col gap-2 mt-2">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="light"
+                  size="xs"
+                  leftSection={<Bug className="w-3.5 h-3.5" />}
+                  loading={testEventSending}
+                  onClick={handleSendTestEvent}
+                >
+                  {testEventSent ? 'Sentry test sent' : 'Send test event to Sentry'}
+                </Button>
+                <Button
+                  variant="light"
+                  size="xs"
+                  leftSection={<BarChart3 className="w-3.5 h-3.5" />}
+                  loading={aptabaseTestSending}
+                  onClick={handleAptabaseTestEvent}
+                >
+                  Send test event to Aptabase
+                </Button>
+              </div>
+              {aptabaseTestResult && (
+                <p
+                  className={cn(
+                    'text-xs',
+                    aptabaseTestResult.success ? 'text-green-600 dark:text-green-400' : 'text-red-500'
+                  )}
+                >
+                  {aptabaseTestResult.success
+                    ? 'Aptabase test event sent. It may take a few minutes to appear in your dashboard.'
+                    : `Aptabase: ${aptabaseTestResult.error}`}
+                </p>
+              )}
+            </div>
           )}
         </section>
 

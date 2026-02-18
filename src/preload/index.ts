@@ -79,7 +79,9 @@ const api = {
   setTitleBarTheme: (themeId: string) => ipcRenderer.invoke('set-title-bar-theme', themeId),
   getPrivacySettings: () => ipcRenderer.invoke('get-privacy-settings') as Promise<{ shareAnalytics: boolean }>,
   toggleAnalytics: () => ipcRenderer.invoke('toggle-analytics') as Promise<{ shareAnalytics: boolean }>,
-  sendSentryTestEvent: () => ipcRenderer.invoke('sentry-test-event') as Promise<{ sent: boolean }>
+  sendSentryTestEvent: () => ipcRenderer.invoke('sentry-test-event') as Promise<{ sent: boolean }>,
+  sendAptabaseTestEvent: () =>
+    ipcRenderer.invoke('aptabase-test-event') as Promise<{ success: boolean; error?: string }>
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to
