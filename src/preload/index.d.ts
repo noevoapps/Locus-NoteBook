@@ -50,6 +50,7 @@ declare global {
       }>
       downloadUpdate: () => Promise<{ success: boolean; error?: string }>
       quitAndInstall: () => Promise<boolean>
+      relaunchApp: () => Promise<boolean>
       onUpdateAvailable: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => () => void
       onUpdateDownloaded: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => () => void
       onUpdateDownloadProgress: (callback: (percent: number) => void) => () => void

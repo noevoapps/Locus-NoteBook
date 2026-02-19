@@ -31,13 +31,38 @@ function isVersionNewer(remote: string, current: string): boolean {
 }
 
 // Privacy-first crash reporting: only send if user opted in
+const SENTRY_DSN =
+  process.env.SENTRY_DSN ||
+  'https://95be6fe73d23d7158ed1ad18a8ab679a@o4510869943681024.ingest.us.sentry.io/4510869956657152'
+
 Sentry.init({
-  dsn: process.env.SENTRY_DSN || 'https://95be6fe73d23d7158ed1ad18a8ab679a@o4510869943681024.ingest.us.sentry.io/4510869956657152',
-  beforeSend(event) {
+  dsn: SENTRY_DSN,
+  release: `locus@${app.getVersion()}`,
+  environment: is.dev ? 'development' : 'production',
+  attachStacktrace: true,
+  maxBreadcrumbs: 100,
+  beforeSend(event, hint) {
     if (!privacyStore.get('shareAnalytics')) return null
+    const error = hint?.originalException
+    if (event.message && !event.exception?.values?.length && error instanceof Error) {
+      event.message = `${error.name}: ${error.message}`
+    }
     return event
   }
 })
+
+Sentry.setTag('process', 'main')
+Sentry.setTag('platform', process.platform)
+
+/** Report an error to Sentry with context (only if user opted in). Use in catch blocks for meaningful issues. */
+function captureToSentry(error: unknown, context: string): void {
+  if (!privacyStore.get('shareAnalytics')) return
+  const err = error instanceof Error ? error : new Error(String(error))
+  Sentry.captureException(err, {
+    extra: { context },
+    level: 'error'
+  })
+}
 
 const APTABASE_APP_KEY = process.env.APTABASE_KEY || 'A-US-6714554317'
 
@@ -164,10 +189,12 @@ app.whenReady().then(async () => {
     autoUpdater.autoInstallOnAppQuit = true
   } catch (err) {
     console.error('Failed to configure autoUpdater:', err)
+    captureToSentry(err, 'autoUpdater.configure')
   }
 
   autoUpdater.on('error', (error) => {
     console.error('Auto-update error:', error)
+    captureToSentry(error, 'autoUpdater.error')
     if (mainWindowRef) {
       const message =
         error instanceof Error ? error.message : error ? String(error) : 'Unknown update error'
@@ -225,6 +252,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error('check-for-updates failed:', err)
+      captureToSentry(err, 'check-for-updates')
       return { success: false, error: message }
     }
   })
@@ -238,6 +266,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       console.error('download-update failed:', err)
+      captureToSentry(err, 'download-update')
       return { success: false, error: message }
     }
   })
@@ -245,6 +274,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('quit-and-install', () => {
     // This will close the app and install the downloaded update.
     autoUpdater.quitAndInstall()
+    return true
+  })
+  ipcMain.handle('relaunch-app', () => {
+    app.relaunch()
+    app.quit()
     return true
   })
   ipcMain.handle('sentry-test-event', () => {
@@ -403,6 +437,7 @@ app.whenReady().then(async () => {
       return { folders, rootNotes, folderNotes, folderMetadata }
     } catch (err) {
       console.error('notes-list failed:', err)
+      captureToSentry(err, 'notes-list')
       return { folders: [], rootNotes: [], folderNotes: {}, folderMetadata: {} }
     }
   })
@@ -608,6 +643,7 @@ app.whenReady().then(async () => {
       return { success: true }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
+      captureToSentry(err, 'export-audio-wav')
       return { success: false, error: message }
     } finally {
       for (const p of [webmPath, wavPath]) {

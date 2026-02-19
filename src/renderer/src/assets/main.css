@@ -115,6 +115,26 @@ body {
   width: 100vw;
 }
 
+/* BlockNote editor: use app theme variables so the note block updates when theme changes */
+.bn-container,
+.bn-mantine {
+  --bn-colors-editor-background: var(--theme-background);
+  --bn-colors-editor-text: var(--theme-foreground);
+  --bn-colors-menu-background: var(--theme-surface);
+  --bn-colors-menu-text: var(--theme-foreground);
+  --bn-colors-tooltip-background: var(--theme-primary);
+  --bn-colors-tooltip-text: var(--theme-foreground);
+  --bn-colors-hovered-background: var(--theme-border);
+  --bn-colors-hovered-text: var(--theme-foreground);
+  --bn-colors-selected-background: var(--theme-primary);
+  --bn-colors-selected-text: var(--theme-foreground);
+  --bn-colors-disabled-background: var(--theme-surface);
+  --bn-colors-disabled-text: var(--theme-muted);
+  --bn-colors-border: var(--theme-border);
+  --bn-colors-side-menu: var(--theme-muted);
+  --bn-font-family: var(--theme-font-family);
+}
+
 code {
   font-weight: 600;
   padding: 3px 5px;

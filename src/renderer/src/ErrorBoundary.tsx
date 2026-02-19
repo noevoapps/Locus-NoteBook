@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/electron/renderer'
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 interface Props {
@@ -21,6 +22,17 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error('App error:', error, errorInfo)
+    Sentry.captureException(error, {
+      level: 'error',
+      contexts: {
+        react: {
+          componentStack: errorInfo.componentStack
+        }
+      },
+      extra: {
+        componentStack: errorInfo.componentStack
+      }
+    })
   }
 
   render() {

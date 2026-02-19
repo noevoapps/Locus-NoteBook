@@ -31,6 +31,7 @@ const api = {
   downloadUpdate: () =>
     ipcRenderer.invoke('download-update') as Promise<{ success: boolean; error?: string }>,
   quitAndInstall: () => ipcRenderer.invoke('quit-and-install') as Promise<boolean>,
+  relaunchApp: () => ipcRenderer.invoke('relaunch-app') as Promise<boolean>,
   onUpdateAvailable: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => {
     const fn = (_: unknown, info: { version: string; releaseNotes: unknown | null }) =>
       callback(info)

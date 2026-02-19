@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Modal, Switch, Button } from '@mantine/core'
-import { Settings, Bug, BarChart3 } from 'lucide-react'
+import { Settings, Bug, BarChart3, RefreshCw } from 'lucide-react'
 import * as Sentry from '@sentry/electron/renderer'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
@@ -23,19 +23,26 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   useEffect(() => {
     if (!opened) return
     window.api?.getPrivacySettings?.().then((s) => {
-      if (s && typeof s.shareAnalytics === 'boolean') setShareAnalytics(s.shareAnalytics)
+      if (s && typeof s.shareAnalytics === 'boolean') {
+        setShareAnalytics(s.shareAnalytics)
+        window.__shareAnalytics = s.shareAnalytics
+      }
     })
   }, [opened])
   useEffect(() => {
     if (!opened) {
       setTestEventSent(false)
       setAptabaseTestResult(null)
+      setShowRestartForThemeModal(false)
     }
   }, [opened])
 
   const handleToggleAnalytics = async () => {
     const result = await window.api?.toggleAnalytics?.()
-    if (result && typeof result.shareAnalytics === 'boolean') setShareAnalytics(result.shareAnalytics)
+    if (result && typeof result.shareAnalytics === 'boolean') {
+      setShareAnalytics(result.shareAnalytics)
+      window.__shareAnalytics = result.shareAnalytics
+    }
   }
 
   const [testEventSending, setTestEventSending] = useState(false)
@@ -57,6 +64,12 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
 
   const [aptabaseTestSending, setAptabaseTestSending] = useState(false)
   const [aptabaseTestResult, setAptabaseTestResult] = useState<{ success: boolean; error?: string } | null>(null)
+  const [showRestartForThemeModal, setShowRestartForThemeModal] = useState(false)
+  const handleThemeChange = (id: ThemeId) => {
+    if (id === themeId) return
+    setTheme(id)
+    setShowRestartForThemeModal(true)
+  }
   const handleAptabaseTestEvent = async () => {
     setAptabaseTestResult(null)
     setAptabaseTestSending(true)
@@ -151,7 +164,7 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
               return (
                 <button
                   key={id}
-                  onClick={() => setTheme(id as ThemeId)}
+                  onClick={() => handleThemeChange(id as ThemeId)}
                   className={cn(
                     'flex items-center gap-2 px-4 py-2.5 rounded-lg border transition-colors',
                     themeId === id
@@ -170,6 +183,42 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
           </div>
         </section>
       </div>
+
+      <Modal
+        opened={showRestartForThemeModal}
+        onClose={() => setShowRestartForThemeModal(false)}
+        title="Restart required"
+        centered
+        zIndex={10001}
+        radius={20}
+        overlayProps={{ backgroundOpacity: 0.7, blur: 2 }}
+        classNames={{
+          inner: '!bg-sidebar',
+          content: '!bg-sidebar border border-border rounded-[20px] overflow-hidden',
+          header: '!bg-sidebar border-b border-border',
+          title: 'text-foreground',
+          body: '!bg-sidebar'
+        }}
+      >
+        <p className="text-foreground text-sm mb-4">
+          Theme updated. Please restart the app for the new theme to apply to the note editor.
+        </p>
+        <div className="flex gap-2">
+          <Button
+            variant="filled"
+            leftSection={<RefreshCw className="w-4 h-4" />}
+            onClick={() => {
+              window.api?.relaunchApp?.()
+            }}
+            classNames={{ root: 'bg-primary hover:bg-primary/90' }}
+          >
+            Restart now
+          </Button>
+          <Button variant="default" onClick={() => setShowRestartForThemeModal(false)}>
+            Later
+          </Button>
+        </div>
+      </Modal>
     </Modal>
   )
 }

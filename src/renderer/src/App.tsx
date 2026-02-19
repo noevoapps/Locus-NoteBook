@@ -443,13 +443,20 @@ export default function App(): React.JSX.Element {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const aiModelDropdownRef = useRef<HTMLDivElement>(null)
   const [savedIndicator, setSavedIndicator] = useState(false)
-  const [editorContextMenu, setEditorContextMenu] = useState<{ x: number; y: number; audioUrl?: string } | null>(null)
+  const [editorContextMenu, setEditorContextMenu] = useState<{
+    x: number
+    y: number
+    audioUrl?: string
+    audioBlockId?: string
+  } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
   const noteContextMenuRef = useRef<HTMLDivElement>(null)
   const editorContextMenuRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const codeBlockSelectInteractingRef = useRef(false)
   const isMountedRef = useRef(true)
+  const currentNoteIdRef = useRef<string | null>(null)
+  const autoSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [updateModalOpen, setUpdateModalOpen] = useState(false)
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
   const [updateReleaseNotes, setUpdateReleaseNotes] = useState<unknown | null>(null)
@@ -459,7 +466,7 @@ export default function App(): React.JSX.Element {
   const [updateProgress, setUpdateProgress] = useState(0)
   const [updateError, setUpdateError] = useState<string | null>(null)
 
-  const { theme } = useTheme()
+  const { theme, themeId } = useTheme()
 
   useEffect(() => {
     isMountedRef.current = true
@@ -467,6 +474,18 @@ export default function App(): React.JSX.Element {
       isMountedRef.current = false
     }
   }, [])
+
+  useEffect(() => {
+    currentNoteIdRef.current = selectedNoteId
+  }, [selectedNoteId])
+
+  // Clear pending auto-save when switching notes so we don't save the wrong note
+  useEffect(() => {
+    if (autoSaveTimeoutRef.current) {
+      clearTimeout(autoSaveTimeoutRef.current)
+      autoSaveTimeoutRef.current = null
+    }
+  }, [selectedNoteId, selectedFolderId])
 
   // Auto-update: subscribe to update events from main process and trigger a check on startup.
   useEffect(() => {
@@ -925,6 +944,16 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [saveCurrentNote])
 
+  const AUTO_SAVE_DELAY_MS = 2000
+  const handleEditorChange = useCallback(() => {
+    if (!selectedNoteId || !editor) return
+    if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current)
+    autoSaveTimeoutRef.current = setTimeout(() => {
+      autoSaveTimeoutRef.current = null
+      saveCurrentNote()
+    }, AUTO_SAVE_DELAY_MS)
+  }, [selectedNoteId, editor, saveCurrentNote])
+
   const createNewNote = useCallback(
     async (folderId?: string) => {
       if (selectedNoteId && editor) {
@@ -1069,50 +1098,74 @@ export default function App(): React.JSX.Element {
         const blob = await stopRecording()
         if (!editor) return
 
-        // Add the recording as an embedded audio block
+        const noteIdAtStart = selectedNoteId
+
+        // Add the recording as an embedded audio block and a placeholder paragraph for the transcript
         const dataUrl = await blobToDataUrl(blob)
         const doc = editor.document
         const refBlock = doc[doc.length - 1]
         const audioBlock = { type: 'audio' as const, props: { url: dataUrl, name: 'Recording' } }
+        const placeholderBlock = { type: 'paragraph' as const, content: [] }
 
         if (refBlock) {
-          const inserted = editor.insertBlocks([audioBlock], refBlock, 'after')
-          const audioRef = inserted[0]
+          const inserted = editor.insertBlocks([audioBlock, placeholderBlock], refBlock, 'after')
+          const placeholderRef = inserted[1]
 
-          // Transcribe and add transcript as paragraph after the audio
-          try {
-            const buffer = await blobToArrayBuffer(blob)
-            const transcribe =
-              window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
-            const text = await transcribe(buffer)
-            if (text && audioRef) {
-              editor.insertBlocks([{ type: 'paragraph', content: text }], audioRef, 'after')
-            }
-          } catch {
-            /* transcription failed - audio is still added */
-          }
+          // Transcribe in background; only update the placeholder if we're still on the same note
+          const transcribe =
+            window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
+          blobToArrayBuffer(blob)
+            .then((buffer) => transcribe(buffer))
+            .then((text) => {
+              if (!text) return
+              if (currentNoteIdRef.current !== noteIdAtStart || !editor) return
+              try {
+                const block = editor.getBlock(placeholderRef.id)
+                if (block) editor.updateBlock(placeholderRef, { type: 'paragraph', content: text })
+              } catch {
+                /* block may have been removed or document changed */
+              }
+            })
+            .catch(() => {
+              /* transcription failed - user can use manual Transcribe on the audio block */
+            })
+            .finally(() => {
+              setIsTranscribing(false)
+            })
         } else {
-          const blocksToInsert: Parameters<typeof editor.replaceBlocks>[1] = [audioBlock]
-          try {
-            const buffer = await blobToArrayBuffer(blob)
-            const transcribe =
-              window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
-            const text = await transcribe(buffer)
-            if (text) blocksToInsert.push({ type: 'paragraph', content: text })
-          } catch {
-            /* transcription failed */
-          }
-          editor.replaceBlocks(editor.document, blocksToInsert.length > 0 ? blocksToInsert : [{ type: 'paragraph', content: [] }])
+          const blocksToInsert: Parameters<typeof editor.replaceBlocks>[1] = [audioBlock, placeholderBlock]
+          editor.replaceBlocks(editor.document, blocksToInsert)
+          const placeholderRef = editor.document[editor.document.length - 1]
+
+          const transcribe =
+            window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
+          blobToArrayBuffer(blob)
+            .then((buffer) => transcribe(buffer))
+            .then((text) => {
+              if (!text) return
+              if (currentNoteIdRef.current !== noteIdAtStart || !editor) return
+              try {
+                const block = editor.getBlock(placeholderRef.id)
+                if (block) editor.updateBlock(placeholderRef, { type: 'paragraph', content: text })
+              } catch {
+                /* block may have been removed or document changed */
+              }
+            })
+            .catch(() => {
+              /* transcription failed */
+            })
+            .finally(() => {
+              setIsTranscribing(false)
+            })
         }
       } catch (err) {
         console.error('Recording/transcription failed:', err)
-      } finally {
         setIsTranscribing(false)
       }
     } else {
       await startRecording()
     }
-  }, [isRecording, stopRecording, startRecording, blobToArrayBuffer, blobToDataUrl, editor])
+  }, [isRecording, stopRecording, startRecording, blobToArrayBuffer, blobToDataUrl, editor, selectedNoteId])
 
   const handleSummarize = useCallback(() => {
     if (!editor) return
@@ -1631,6 +1684,7 @@ export default function App(): React.JSX.Element {
             onContextMenu={(e) => {
               e.preventDefault()
               let audioUrl: string | undefined
+              let audioBlockId: string | undefined
               if (editor?.prosemirrorView && editorContainerRef.current) {
                 const elements = document.elementsFromPoint(e.clientX, e.clientY)
                 for (const el of elements) {
@@ -1640,16 +1694,23 @@ export default function App(): React.JSX.Element {
                       const block = editor.getBlock(id)
                       if (block?.type === 'audio' && block?.props?.url) {
                         audioUrl = block.props.url as string
+                        audioBlockId = id
                       }
                     }
                     break
                   }
                 }
               }
-              setEditorContextMenu({ x: e.clientX, y: e.clientY, audioUrl })
+              setEditorContextMenu({ x: e.clientX, y: e.clientY, audioUrl, audioBlockId })
             }}
           >
-            <BlockNoteView editor={editor} theme={blockNoteTheme} className="min-h-full" />
+            <BlockNoteView
+              key={themeId}
+              editor={editor}
+              theme={blockNoteTheme}
+              className="min-h-full"
+              onChange={handleEditorChange}
+            />
             {editorContextMenu && typeof editorContextMenu.x === 'number' && typeof editorContextMenu.y === 'number' && (
               <div
                 ref={editorContextMenuRef}
@@ -1790,27 +1851,56 @@ export default function App(): React.JSX.Element {
                 </button>
                 <div className="my-1.5 border-t border-border" />
                 {editorContextMenu.audioUrl && (
-                  <button
-                    className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
-                    onMouseDown={async (e) => {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      const url = editorContextMenu.audioUrl
-                      setEditorContextMenu(null)
-                      if (!url || !window.api?.exportAudioAsWav) return
-                      try {
-                        const result = await window.api.exportAudioAsWav(url)
-                        if (!result.success && result.error && !result.canceled) {
-                          console.error('Export audio as WAV failed:', result.error)
+                  <>
+                    <button
+                      className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
+                      onMouseDown={async (e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const url = editorContextMenu.audioUrl
+                        const blockId = editorContextMenu.audioBlockId
+                        setEditorContextMenu(null)
+                        if (!url || !blockId || !editor) return
+                        const transcribe =
+                          window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
+                        try {
+                          const res = await fetch(url)
+                          const buffer = await res.arrayBuffer()
+                          const text = await transcribe(buffer)
+                          if (text) {
+                            const audioBlock = editor.getBlock(blockId)
+                            if (audioBlock) editor.insertBlocks([{ type: 'paragraph', content: text }], audioBlock, 'after')
+                          }
+                        } catch (err) {
+                          console.error('Transcribe failed:', err)
                         }
-                      } catch (err) {
-                        console.error('Export audio as WAV failed:', err)
-                      }
-                    }}
-                  >
-                    <Download className="w-4 h-4 text-muted flex-shrink-0" />
-                    Download as WAV
-                  </button>
+                      }}
+                    >
+                      <FileText className="w-4 h-4 text-muted flex-shrink-0" />
+                      Transcribe
+                    </button>
+                    <button
+                      className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
+                      onMouseDown={async (e) => {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        const url = editorContextMenu.audioUrl
+                        setEditorContextMenu(null)
+                        if (!url || !window.api?.exportAudioAsWav) return
+                        try {
+                          const result = await window.api.exportAudioAsWav(url)
+                          if (!result.success && result.error && !result.canceled) {
+                            console.error('Export audio as WAV failed:', result.error)
+                          }
+                        } catch (err) {
+                          console.error('Export audio as WAV failed:', err)
+                        }
+                      }}
+                    >
+                      <Download className="w-4 h-4 text-muted flex-shrink-0" />
+                      Download as WAV
+                    </button>
+                  </>
                 )}
                 <button
                   className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
