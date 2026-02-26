@@ -12,8 +12,6 @@ type LogLevel = (typeof LOG_LEVELS)[number]
 
 let logDir: string | null = null
 const LOG_FILE = 'locus.log'
-const MAX_LOG_SIZE_BYTES = 2 * 1024 * 1024 // 2 MB
-const MAX_BACKUPS = 2
 
 export function setLogDir(dir: string): void {
   logDir = dir
