@@ -82,7 +82,12 @@ const api = {
   toggleAnalytics: () => ipcRenderer.invoke('toggle-analytics') as Promise<{ shareAnalytics: boolean }>,
   sendSentryTestEvent: () => ipcRenderer.invoke('sentry-test-event') as Promise<{ sent: boolean }>,
   sendAptabaseTestEvent: () =>
-    ipcRenderer.invoke('aptabase-test-event') as Promise<{ success: boolean; error?: string }>
+    ipcRenderer.invoke('aptabase-test-event') as Promise<{ success: boolean; error?: string }>,
+  getLogPath: () => ipcRenderer.invoke('get-log-path') as Promise<string | null>,
+  openLogFile: () =>
+    ipcRenderer.invoke('open-log-file') as Promise<{ opened: boolean; error?: string }>,
+  logToMain: (level: string, message: string, detail?: unknown) =>
+    ipcRenderer.invoke('log-from-renderer', level, message, detail)
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

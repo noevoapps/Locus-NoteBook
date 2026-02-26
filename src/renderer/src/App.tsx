@@ -1,6 +1,6 @@
 import { useCallback, useState, useEffect, useRef } from 'react'
 import { MantineProvider, Menu, Modal, TextInput } from '@mantine/core'
-import { useCreateBlockNote } from '@blocknote/react'
+import { createReactBlockSpec, useCreateBlockNote } from '@blocknote/react'
 import { BlockNoteView } from '@blocknote/mantine'
 import { BlockNoteSchema, createCodeBlockSpec, selectedFragmentToHTML } from '@blocknote/core'
 import { codeBlockOptions } from '@blocknote/code-block'
@@ -68,6 +68,7 @@ import {
   Flag,
   Pipette,
   Settings,
+  Loader2,
   type LucideIcon
 } from 'lucide-react'
 import { clsx } from 'clsx'
@@ -411,6 +412,35 @@ function formatDate(ts: number) {
   return d.toLocaleDateString()
 }
 
+/** Custom block shown while transcription is in progress; replaced by a paragraph when done. */
+const createTranscribingPlaceholder = createReactBlockSpec(
+  {
+    type: 'transcribingPlaceholder',
+    content: 'none',
+    propSchema: {}
+  },
+  {
+    render: () => (
+      <div
+        className="flex items-center gap-2 py-3 px-4 rounded-lg bg-primary/10 border border-primary/30 text-primary text-sm font-medium"
+        role="status"
+        aria-live="polite"
+      >
+        <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" aria-hidden />
+        <span>Transcribing...</span>
+      </div>
+    )
+  }
+)
+
+function logToMain(level: 'debug' | 'info' | 'warn' | 'error', message: string, detail?: unknown): void {
+  try {
+    window.api?.logToMain?.(level, message, detail)
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function App(): React.JSX.Element {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [notesData, setNotesData] = useState<NotesData>({ folders: [], rootNotes: [], folderNotes: {} })
@@ -443,6 +473,11 @@ export default function App(): React.JSX.Element {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const aiModelDropdownRef = useRef<HTMLDivElement>(null)
   const [savedIndicator, setSavedIndicator] = useState(false)
+  const [transcribeStatus, setTranscribeStatus] = useState<{
+    type: 'transcribing' | 'success' | 'error'
+    message?: string
+  } | null>(null)
+  const transcribeStatusTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [editorContextMenu, setEditorContextMenu] = useState<{
     x: number
     y: number
@@ -472,12 +507,34 @@ export default function App(): React.JSX.Element {
     isMountedRef.current = true
     return () => {
       isMountedRef.current = false
+      if (transcribeStatusTimeoutRef.current) {
+        clearTimeout(transcribeStatusTimeoutRef.current)
+        transcribeStatusTimeoutRef.current = null
+      }
     }
   }, [])
 
   useEffect(() => {
     currentNoteIdRef.current = selectedNoteId
   }, [selectedNoteId])
+
+  // Clear transcribe status after a delay
+  const setTranscribeStatusWithAutoClear = useCallback(
+    (status: { type: 'transcribing' | 'success' | 'error'; message?: string } | null, clearMs?: number) => {
+      if (transcribeStatusTimeoutRef.current) {
+        clearTimeout(transcribeStatusTimeoutRef.current)
+        transcribeStatusTimeoutRef.current = null
+      }
+      setTranscribeStatus(status)
+      if (status && status.type !== 'transcribing' && clearMs != null) {
+        transcribeStatusTimeoutRef.current = setTimeout(() => {
+          transcribeStatusTimeoutRef.current = null
+          setTranscribeStatus(null)
+        }, clearMs)
+      }
+    },
+    []
+  )
 
   // Clear pending auto-save when switching notes so we don't save the wrong note
   useEffect(() => {
@@ -575,7 +632,8 @@ export default function App(): React.JSX.Element {
     uploadFile,
     schema: BlockNoteSchema.create().extend({
       blockSpecs: {
-        codeBlock: createCodeBlockSpec(codeBlockOptions)
+        codeBlock: createCodeBlockSpec(codeBlockOptions),
+        transcribingPlaceholder: createTranscribingPlaceholder()
       }
     })
   })
@@ -676,69 +734,63 @@ export default function App(): React.JSX.Element {
 
   const loadNoteContent = useCallback(
     async (id: string, folderId?: string) => {
-      const data = await window.electron.ipcRenderer.invoke('notes-load', id, folderId)
-      if (!data) return
+      try {
+        const data = await window.electron.ipcRenderer.invoke('notes-load', id, folderId)
+        if (!data) return
 
-      if (isMountedRef.current) {
-        setTitle(data.title || 'Untitled Note')
-      }
+        if (isMountedRef.current) {
+          setTitle(data.title || 'Untitled Note')
+        }
 
-      // BlockNote/TipTap can throw if we update content before the view mounts.
-      // This can happen on slower machines or on relaunch when effects fire quickly.
-      const apply = () => {
-        if (!editor) return false
-        // If the settings page is open, the editor view is unmounted.
-        if (settingsModalOpen) return false
-        try {
-          let blocks: Parameters<typeof editor.replaceBlocks>[1]
-          if (data.content) {
-            const trimmed = data.content.trim()
-            if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-              try {
-                blocks = JSON.parse(data.content) as Parameters<typeof editor.replaceBlocks>[1]
-              } catch {
+        // BlockNote/TipTap can throw if we update content before the view mounts.
+        const apply = () => {
+          if (!editor) return false
+          if (settingsModalOpen) return false
+          try {
+            let blocks: Parameters<typeof editor.replaceBlocks>[1]
+            if (data.content) {
+              const trimmed = data.content.trim()
+              if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+                try {
+                  blocks = JSON.parse(data.content) as Parameters<typeof editor.replaceBlocks>[1]
+                } catch {
+                  blocks = editor.tryParseMarkdownToBlocks(data.content)
+                }
+              } else {
                 blocks = editor.tryParseMarkdownToBlocks(data.content)
               }
             } else {
-              blocks = editor.tryParseMarkdownToBlocks(data.content)
+              blocks = []
             }
-          } else {
-            blocks = []
+            editor.replaceBlocks(editor.document, blocks)
+            return true
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e)
+            if (msg.includes('domAtPos') || msg.includes('editor view is not available')) return false
+            logToMain('warn', 'loadNoteContent apply() failed', { message: msg, noteId: id })
+            throw e
           }
-          editor.replaceBlocks(editor.document, blocks)
-          return true
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e)
-          // Common initialization race: "Cannot access view['domAtPos']"
-          if (msg.includes('domAtPos') || msg.includes('editor view is not available')) return false
-          throw e
         }
-      }
 
-      for (let i = 0; i < 30 && isMountedRef.current; i++) {
-        if (apply()) return
-        await new Promise((r) => setTimeout(r, 50))
+        for (let i = 0; i < 30 && isMountedRef.current; i++) {
+          if (apply()) return
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        logToMain('warn', 'loadNoteContent timed out after retries', { noteId: id })
+      } catch (err) {
+        logToMain('error', 'loadNoteContent failed', err instanceof Error ? { message: err.message, stack: err.stack } : err)
+        throw err
       }
     },
     [editor, settingsModalOpen]
   )
 
   const openOrSwitchToTab = useCallback(
-    async (id: string, folderId?: string, noteTitle?: string) => {
+    (id: string, folderId?: string, noteTitle?: string) => {
       const existingIdx = openTabs.findIndex((t) => t.id === id && t.folderId === folderId)
       if (existingIdx >= 0) {
         setActiveTabIndex(existingIdx)
         return
-      }
-      if (selectedNoteId && editor) {
-        const content = JSON.stringify(editor.document)
-        await window.electron.ipcRenderer.invoke('notes-save', {
-          id: selectedNoteId,
-          title,
-          content,
-          folderId: selectedFolderId
-        })
-        await loadNotes()
       }
       const meta = folderId
         ? notesData.folderNotes[folderId]?.find((n) => n.id === id)
@@ -747,42 +799,21 @@ export default function App(): React.JSX.Element {
       setOpenTabs((prev) => [...prev, { id, folderId, title: tabTitle }])
       setActiveTabIndex(openTabs.length)
     },
-    [openTabs, selectedNoteId, selectedFolderId, title, editor, loadNotes, notesData]
+    [openTabs, notesData]
   )
 
   const switchToTab = useCallback(
-    async (index: number) => {
+    (index: number) => {
       if (index === activeTabIndex) return
-      if (selectedNoteId && editor) {
-        const content = JSON.stringify(editor.document)
-        await window.electron.ipcRenderer.invoke('notes-save', {
-          id: selectedNoteId,
-          title,
-          content,
-          folderId: selectedFolderId
-        })
-        await loadNotes()
-      }
       setActiveTabIndex(index)
     },
-    [activeTabIndex, selectedNoteId, selectedFolderId, title, editor, loadNotes]
+    [activeTabIndex]
   )
 
   const closeTab = useCallback(
-    async (index: number) => {
+    (index: number) => {
       const tab = openTabs[index]
       if (!tab) return
-      const isActive = index === activeTabIndex
-      if (isActive && editor) {
-        const content = JSON.stringify(editor.document)
-        await window.electron.ipcRenderer.invoke('notes-save', {
-          id: tab.id,
-          title,
-          content,
-          folderId: tab.folderId
-        })
-        await loadNotes()
-      }
       const newTabs = openTabs.filter((_, i) => i !== index)
       setOpenTabs(newTabs)
       if (newTabs.length === 0) return
@@ -796,12 +827,15 @@ export default function App(): React.JSX.Element {
       }
       setActiveTabIndex(newIndex)
     },
-    [openTabs, activeTabIndex, title, editor, loadNotes]
+    [openTabs, activeTabIndex]
   )
 
   useEffect(() => {
-    if (selectedNoteId) loadNoteContent(selectedNoteId, selectedFolderId)
-  }, [selectedNoteId, selectedFolderId])
+    if (!selectedNoteId) return
+    loadNoteContent(selectedNoteId, selectedFolderId).catch((err) => {
+      logToMain('error', 'loadNoteContent effect failed', err instanceof Error ? { message: err.message, stack: err.stack } : err)
+    })
+  }, [selectedNoteId, selectedFolderId, loadNoteContent])
 
   // Add line numbers to code blocks
   useEffect(() => {
@@ -944,7 +978,7 @@ export default function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [saveCurrentNote])
 
-  const AUTO_SAVE_DELAY_MS = 2000
+  const AUTO_SAVE_DELAY_MS = 7000
   const handleEditorChange = useCallback(() => {
     if (!selectedNoteId || !editor) return
     if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current)
@@ -1091,81 +1125,123 @@ export default function App(): React.JSX.Element {
     })
   }, [])
 
+  /** Decode a data URL (e.g. data:audio/webm;base64,...) to ArrayBuffer. Works for large payloads where fetch() may fail. */
+  const dataUrlToArrayBuffer = useCallback((dataUrl: string): ArrayBuffer => {
+    const comma = dataUrl.indexOf(',')
+    if (comma === -1) throw new Error('Invalid data URL')
+    const base64 = dataUrl.slice(comma + 1)
+    const binary = atob(base64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes.buffer
+  }, [])
+
+  /** Single entry point for transcription; uses exposed api.transcribe when available. */
+  const transcribeAudio = useCallback((buffer: ArrayBuffer): Promise<string> => {
+    if (typeof window.api?.transcribe === 'function') return window.api.transcribe(buffer)
+    if (typeof (window as unknown as { electron?: { ipcRenderer?: { invoke: (c: string, b: ArrayBuffer) => Promise<string> } } }).electron?.ipcRenderer?.invoke === 'function') {
+      return (window as unknown as { electron: { ipcRenderer: { invoke: (c: string, b: ArrayBuffer) => Promise<string> } } }).electron.ipcRenderer.invoke('transcribe-audio', buffer)
+    }
+    return Promise.reject(new Error('Transcription not available'))
+  }, [])
+
   const handleRecordToggle = useCallback(async () => {
     if (isRecording) {
       try {
         setIsTranscribing(true)
+        setTranscribeStatusWithAutoClear({ type: 'transcribing' })
         const blob = await stopRecording()
-        if (!editor) return
+        if (!editor) {
+          setIsTranscribing(false)
+          setTranscribeStatusWithAutoClear(null)
+          return
+        }
 
         const noteIdAtStart = selectedNoteId
+        const failureMessage = 'Transcription failed. Right-click the audio and choose Transcribe to retry.'
 
-        // Add the recording as an embedded audio block and a placeholder paragraph for the transcript
         const dataUrl = await blobToDataUrl(blob)
         const doc = editor.document
         const refBlock = doc[doc.length - 1]
         const audioBlock = { type: 'audio' as const, props: { url: dataUrl, name: 'Recording' } }
-        const placeholderBlock = { type: 'paragraph' as const, content: [] }
+        const transcribingBlock = { type: 'transcribingPlaceholder' as const, props: {} }
+
+        let placeholderId: string
 
         if (refBlock) {
-          const inserted = editor.insertBlocks([audioBlock, placeholderBlock], refBlock, 'after')
-          const placeholderRef = inserted[1]
-
-          // Transcribe in background; only update the placeholder if we're still on the same note
-          const transcribe =
-            window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
-          blobToArrayBuffer(blob)
-            .then((buffer) => transcribe(buffer))
-            .then((text) => {
-              if (!text) return
-              if (currentNoteIdRef.current !== noteIdAtStart || !editor) return
-              try {
-                const block = editor.getBlock(placeholderRef.id)
-                if (block) editor.updateBlock(placeholderRef, { type: 'paragraph', content: text })
-              } catch {
-                /* block may have been removed or document changed */
-              }
-            })
-            .catch(() => {
-              /* transcription failed - user can use manual Transcribe on the audio block */
-            })
-            .finally(() => {
-              setIsTranscribing(false)
-            })
+          const inserted = editor.insertBlocks([audioBlock, transcribingBlock], refBlock, 'after')
+          const second = inserted?.[1]
+          placeholderId = (second && typeof second === 'object' && 'id' in second ? second.id : undefined) ?? ''
+          if (!placeholderId) {
+            const lastBlock = editor.document[editor.document.length - 1]
+            if (lastBlock?.type === 'transcribingPlaceholder') placeholderId = lastBlock.id
+          }
         } else {
-          const blocksToInsert: Parameters<typeof editor.replaceBlocks>[1] = [audioBlock, placeholderBlock]
-          editor.replaceBlocks(editor.document, blocksToInsert)
-          const placeholderRef = editor.document[editor.document.length - 1]
-
-          const transcribe =
-            window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
-          blobToArrayBuffer(blob)
-            .then((buffer) => transcribe(buffer))
-            .then((text) => {
-              if (!text) return
-              if (currentNoteIdRef.current !== noteIdAtStart || !editor) return
-              try {
-                const block = editor.getBlock(placeholderRef.id)
-                if (block) editor.updateBlock(placeholderRef, { type: 'paragraph', content: text })
-              } catch {
-                /* block may have been removed or document changed */
-              }
-            })
-            .catch(() => {
-              /* transcription failed */
-            })
-            .finally(() => {
-              setIsTranscribing(false)
-            })
+          editor.replaceBlocks(editor.document, [audioBlock, transcribingBlock])
+          const lastBlock = editor.document[editor.document.length - 1]
+          placeholderId = lastBlock?.type === 'transcribingPlaceholder' ? lastBlock.id : (lastBlock?.id ?? '')
         }
+
+        blobToArrayBuffer(blob)
+          .then((buffer) => transcribeAudio(buffer))
+          .then((text) => {
+            if (currentNoteIdRef.current !== noteIdAtStart || !editor) return
+            if (!placeholderId) return
+            try {
+              const block = editor.getBlock(placeholderId)
+              if (block) {
+                if (text && text.trim()) {
+                  editor.replaceBlocks([block], [{ type: 'paragraph', content: text.trim() }])
+                  setTranscribeStatusWithAutoClear({ type: 'success' }, 3000)
+                } else {
+                  editor.replaceBlocks([block], [{ type: 'paragraph', content: failureMessage }])
+                  setTranscribeStatusWithAutoClear({ type: 'error', message: 'No text returned' }, 5000)
+                }
+              }
+            } catch {
+              /* block may have been removed or document changed */
+            }
+          })
+          .catch((err) => {
+            console.error('Auto-transcription failed:', err)
+            if (currentNoteIdRef.current === noteIdAtStart && editor && placeholderId) {
+              try {
+                const block = editor.getBlock(placeholderId)
+                if (block) {
+                  editor.replaceBlocks([block], [{ type: 'paragraph', content: failureMessage }])
+                  setTranscribeStatusWithAutoClear(
+                    { type: 'error', message: err instanceof Error ? err.message : String(err) },
+                    5000
+                  )
+                }
+              } catch {
+                setTranscribeStatusWithAutoClear(
+                  { type: 'error', message: err instanceof Error ? err.message : String(err) },
+                  5000
+                )
+              }
+            } else {
+              setTranscribeStatusWithAutoClear(
+                { type: 'error', message: err instanceof Error ? err.message : String(err) },
+                5000
+              )
+            }
+          })
+          .finally(() => {
+            setIsTranscribing(false)
+          })
       } catch (err) {
         console.error('Recording/transcription failed:', err)
         setIsTranscribing(false)
+        setTranscribeStatusWithAutoClear(
+          { type: 'error', message: err instanceof Error ? err.message : String(err) },
+          5000
+        )
       }
     } else {
       await startRecording()
     }
-  }, [isRecording, stopRecording, startRecording, blobToArrayBuffer, blobToDataUrl, editor, selectedNoteId])
+  }, [isRecording, stopRecording, startRecording, blobToArrayBuffer, blobToDataUrl, editor, selectedNoteId, setTranscribeStatusWithAutoClear, transcribeAudio])
 
   const handleSummarize = useCallback(() => {
     if (!editor) return
@@ -1538,6 +1614,35 @@ export default function App(): React.JSX.Element {
                 <span>Saved</span>
               </div>
             )}
+            {transcribeStatus && (
+              <div
+                className={cn(
+                  'flex items-center gap-1.5 text-sm font-medium max-w-[280px] truncate',
+                  transcribeStatus.type === 'transcribing' && 'text-muted',
+                  transcribeStatus.type === 'success' && 'text-primary',
+                  transcribeStatus.type === 'error' && 'text-red-500'
+                )}
+                title={transcribeStatus.message}
+              >
+                {transcribeStatus.type === 'transcribing' && (
+                  <>
+                    <span className="animate-pulse">Transcribing...</span>
+                  </>
+                )}
+                {transcribeStatus.type === 'success' && (
+                  <>
+                    <Check className="w-4 h-4 flex-shrink-0" />
+                    <span>Transcribed</span>
+                  </>
+                )}
+                {transcribeStatus.type === 'error' && (
+                  <>
+                    <X className="w-4 h-4 flex-shrink-0" />
+                    <span className="truncate">{transcribeStatus.message || 'Transcription failed'}</span>
+                  </>
+                )}
+              </div>
+            )}
             <input
               type="text"
               value={title}
@@ -1681,21 +1786,36 @@ export default function App(): React.JSX.Element {
           <div
             ref={editorContainerRef}
             className="flex-1 overflow-auto p-6 relative rounded-b-2xl"
-            onContextMenu={(e) => {
+          >
+            {(isTranscribing || transcribeStatus?.type === 'transcribing') && (
+              <div
+                className="sticky top-0 z-10 flex items-center gap-2 py-2 px-4 mb-2 rounded-lg bg-primary/15 border border-primary/40 text-primary text-sm font-medium"
+                role="status"
+                aria-live="polite"
+              >
+                <Loader2 className="w-4 h-4 flex-shrink-0 animate-spin" aria-hidden />
+                <span>Transcribing recording…</span>
+              </div>
+            )}
+            <div
+              className="min-h-full"
+              onContextMenu={(e) => {
               e.preventDefault()
               let audioUrl: string | undefined
               let audioBlockId: string | undefined
-              if (editor?.prosemirrorView && editorContainerRef.current) {
+              if (editor && editorContainerRef.current && editorContainerRef.current.contains(e.target as Node)) {
                 const elements = document.elementsFromPoint(e.clientX, e.clientY)
                 for (const el of elements) {
-                  if (editorContainerRef.current.contains(el) && el.getAttribute?.('data-node-type') === 'blockContainer') {
-                    const id = el.getAttribute('data-id')
-                    if (id) {
-                      const block = editor.getBlock(id)
-                      if (block?.type === 'audio' && block?.props?.url) {
-                        audioUrl = block.props.url as string
-                        audioBlockId = id
-                      }
+                  if (!editorContainerRef.current.contains(el)) continue
+                  const withId = el.closest?.('[data-id]') ?? el
+                  const id = withId.getAttribute?.('data-id') ?? el.getAttribute?.('data-id')
+                  if (!id) continue
+                  const block = editor.getBlock(id)
+                  if (block?.type === 'audio') {
+                    const url = (block as { props?: { url?: string } }).props?.url
+                    if (url) {
+                      audioUrl = url
+                      audioBlockId = id
                     }
                     break
                   }
@@ -1853,7 +1973,8 @@ export default function App(): React.JSX.Element {
                 {editorContextMenu.audioUrl && (
                   <>
                     <button
-                      className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
+                      className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                      disabled={transcribeStatus?.type === 'transcribing'}
                       onMouseDown={async (e) => {
                         e.preventDefault()
                         e.stopPropagation()
@@ -1861,23 +1982,26 @@ export default function App(): React.JSX.Element {
                         const blockId = editorContextMenu.audioBlockId
                         setEditorContextMenu(null)
                         if (!url || !blockId || !editor) return
-                        const transcribe =
-                          window.api?.transcribe ?? ((b: ArrayBuffer) => window.electron.ipcRenderer.invoke('transcribe-audio', b))
+                        setTranscribeStatusWithAutoClear({ type: 'transcribing' })
                         try {
-                          const res = await fetch(url)
-                          const buffer = await res.arrayBuffer()
-                          const text = await transcribe(buffer)
-                          if (text) {
+                          const buffer = dataUrlToArrayBuffer(url)
+                          const text = await transcribeAudio(buffer)
+                          if (text && text.trim()) {
                             const audioBlock = editor.getBlock(blockId)
-                            if (audioBlock) editor.insertBlocks([{ type: 'paragraph', content: text }], audioBlock, 'after')
+                            if (audioBlock) editor.insertBlocks([{ type: 'paragraph', content: text.trim() }], audioBlock, 'after')
+                            setTranscribeStatusWithAutoClear({ type: 'success' }, 3000)
+                          } else {
+                            setTranscribeStatusWithAutoClear({ type: 'error', message: 'No text returned' }, 5000)
                           }
                         } catch (err) {
+                          const message = err instanceof Error ? err.message : String(err)
                           console.error('Transcribe failed:', err)
+                          setTranscribeStatusWithAutoClear({ type: 'error', message }, 5000)
                         }
                       }}
                     >
                       <FileText className="w-4 h-4 text-muted flex-shrink-0" />
-                      Transcribe
+                      {transcribeStatus?.type === 'transcribing' ? 'Transcribing...' : 'Transcribe'}
                     </button>
                     <button
                       className="w-full flex items-center gap-3 px-4 py-2 text-left text-foreground hover:bg-border transition-colors"
@@ -1920,6 +2044,7 @@ export default function App(): React.JSX.Element {
                 </button>
               </div>
             )}
+          </div>
           </div>
           </div>
         </main>

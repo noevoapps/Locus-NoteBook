@@ -43,27 +43,38 @@ Sentry.init({
 Sentry.setTag('process', 'renderer')
 // Release is set in the main process Sentry.init(); renderer does not expose setRelease.
 
-// Capture unhandled errors and rejections that might slip past the SDK
+// Log all renderer errors to main process so they appear in userData/logs/locus.log (visible after crash).
+function logToFile(level: string, message: string, detail?: unknown) {
+  try {
+    window.api?.logToMain?.(level, message, detail)
+  } catch {
+    /* ignore if IPC not ready */
+  }
+}
+
 window.addEventListener('error', (event) => {
-  if (window.__shareAnalytics === false) return
   const msg = event.message || String(event.error)
   const err = event.error instanceof Error ? event.error : new Error(msg)
-  Sentry.captureException(err, {
-    extra: {
-      filename: event.filename,
-      lineno: event.lineno,
-      colno: event.colno
-    }
+  logToFile('error', `window.error: ${msg}`, {
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    stack: err.stack
   })
+  if (window.__shareAnalytics !== false) {
+    Sentry.captureException(err, {
+      extra: { filename: event.filename, lineno: event.lineno, colno: event.colno }
+    })
+  }
 })
 
 window.addEventListener('unhandledrejection', (event) => {
-  if (window.__shareAnalytics === false) return
   const reason = event.reason
   const err = reason instanceof Error ? reason : new Error(String(reason))
-  Sentry.captureException(err, {
-    extra: { type: 'unhandledrejection' }
-  })
+  logToFile('error', `unhandledrejection: ${err.message}`, { stack: err instanceof Error ? err.stack : undefined })
+  if (window.__shareAnalytics !== false) {
+    Sentry.captureException(err, { extra: { type: 'unhandledrejection' } })
+  }
 })
 
 createRoot(document.getElementById('root')!).render(

@@ -55,6 +55,9 @@ declare global {
       onUpdateDownloaded: (callback: (info: { version: string; releaseNotes: unknown | null }) => void) => () => void
       onUpdateDownloadProgress: (callback: (percent: number) => void) => () => void
       onUpdateError: (callback: (message: string) => void) => () => void
+      getLogPath: () => Promise<string | null>
+      openLogFile: () => Promise<{ opened: boolean; error?: string }>
+      logToMain: (level: string, message: string, detail?: unknown) => Promise<void>
     }
   }
 }

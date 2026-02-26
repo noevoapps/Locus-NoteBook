@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Modal, Switch, Button } from '@mantine/core'
-import { Settings, Bug, BarChart3, RefreshCw } from 'lucide-react'
+import { Settings, Bug, BarChart3, RefreshCw, FileText } from 'lucide-react'
 import * as Sentry from '@sentry/electron/renderer'
 import { clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
@@ -18,7 +18,13 @@ type SettingsModalProps = {
 
 export function SettingsModal({ opened, onClose }: SettingsModalProps) {
   const [shareAnalytics, setShareAnalytics] = useState(true)
+  const [logPath, setLogPath] = useState<string | null>(null)
   const { themeId, setTheme, themeIds } = useTheme()
+
+  useEffect(() => {
+    if (!opened) return
+    window.api?.getLogPath?.().then((p) => setLogPath(p ?? null))
+  }, [opened])
 
   useEffect(() => {
     if (!opened) return
@@ -181,6 +187,32 @@ export function SettingsModal({ opened, onClose }: SettingsModalProps) {
               )
             })}
           </div>
+        </section>
+
+        <section>
+          <h3 className="text-sm font-medium text-foreground mb-3">Debug logging</h3>
+          <p className="text-muted text-sm mb-2">
+            Errors and main-process logs are written to a file. If the app crashes (e.g. when switching tabs), open this
+            file to see what went wrong.
+          </p>
+          {logPath && (
+            <p className="text-muted text-xs font-mono truncate mb-2" title={logPath}>
+              {logPath}
+            </p>
+          )}
+          <Button
+            variant="light"
+            size="xs"
+            leftSection={<FileText className="w-3.5 h-3.5" />}
+            onClick={async () => {
+              const result = await window.api?.openLogFile?.()
+              if (result && !result.opened && result.error) {
+                console.error('Open log file:', result.error)
+              }
+            }}
+          >
+            Open log file
+          </Button>
         </section>
       </div>
 

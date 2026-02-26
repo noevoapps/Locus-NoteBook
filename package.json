@@ -45,6 +45,7 @@
     "build:unpack": "npm run build && electron-builder --dir",
     "build:icon": "node scripts/build-icon.js",
     "build:win": "npm run build:icon && npm run build && electron-builder --win",
+    "build:win:publish": "npm run build:icon && npm run build && electron-builder --win --publish always",
     "build:mac": "electron-vite build && electron-builder --mac",
     "build:linux": "electron-vite build && electron-builder --linux"
   },

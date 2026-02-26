@@ -8,8 +8,10 @@ import { privacyStore } from './store'
 import * as Sentry from '@sentry/electron/main'
 import { initialize as aptabaseInitialize, trackEvent as aptabaseTrackEvent } from '@aptabase/electron/main'
 import { autoUpdater } from 'electron-updater'
+import { setLogDir, getLogPath, log, logError } from './logger'
 
 const isWindows = process.platform === 'win32'
+const MAIN_LABEL = 'main'
 
 /** Returns true if remote is a newer semver than current (e.g. 1.0.2 > 1.0.1). */
 function isVersionNewer(remote: string, current: string): boolean {
@@ -63,6 +65,17 @@ function captureToSentry(error: unknown, context: string): void {
     level: 'error'
   })
 }
+
+// Log every main-process exception to console and to userData/logs/locus.log (after app ready).
+process.on('uncaughtException', (err) => {
+  logError(MAIN_LABEL, 'uncaughtException', err)
+  captureToSentry(err, 'uncaughtException')
+  process.exit(1)
+})
+process.on('unhandledRejection', (reason) => {
+  logError(MAIN_LABEL, 'unhandledRejection', reason)
+  captureToSentry(reason instanceof Error ? reason : new Error(String(reason)), 'unhandledRejection')
+})
 
 const APTABASE_APP_KEY = process.env.APTABASE_KEY || 'A-US-6714554317'
 
@@ -158,6 +171,9 @@ function trackEvent(eventName: string, props?: Record<string, string | number | 
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(async () => {
+  setLogDir(app.getPath('userData'))
+  log('info', MAIN_LABEL, 'App ready', { userData: app.getPath('userData') })
+
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.locus')
 
@@ -258,6 +274,19 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('get-app-version', () => app.getVersion())
+
+  ipcMain.handle('get-log-path', () => getLogPath())
+
+  ipcMain.handle('open-log-file', async () => {
+    const path = getLogPath()
+    if (!path || !existsSync(path)) return { opened: false, error: 'Log file not found' }
+    const errMsg = await shell.openPath(path)
+    return errMsg ? { opened: false, error: errMsg } : { opened: true }
+  })
+
+  ipcMain.handle('log-from-renderer', (_event, level: string, message: string, detail?: unknown) => {
+    log((level as 'debug' | 'info' | 'warn' | 'error') || 'info', 'renderer', message, detail)
+  })
 
   ipcMain.handle('download-update', async () => {
     try {
@@ -450,19 +479,31 @@ app.whenReady().then(async () => {
   })
 
   ipcMain.handle('notes-load', (_event, id: string, folderId?: string) => {
-    const base = getNotesFolder()
-    const dir = folderId ? join(base, folderId) : base
-    const path = join(dir, `${id}.json`)
-    if (!existsSync(path)) return null
-    return JSON.parse(readFileSync(path, 'utf-8'))
+    try {
+      const base = getNotesFolder()
+      const dir = folderId ? join(base, folderId) : base
+      const path = join(dir, `${id}.json`)
+      if (!existsSync(path)) return null
+      return JSON.parse(readFileSync(path, 'utf-8'))
+    } catch (err) {
+      logError(MAIN_LABEL, 'notes-load failed', err)
+      captureToSentry(err, 'notes-load')
+      throw err
+    }
   })
 
   ipcMain.handle('notes-save', (_event, data: { id: string; title: string; content: string; folderId?: string }) => {
-    const base = getNotesFolder()
-    const dir = data.folderId ? join(base, data.folderId) : base
-    const payload = { id: data.id, title: data.title, content: data.content, updatedAt: Date.now() }
-    writeFileSync(join(dir, `${data.id}.json`), JSON.stringify(payload, null, 2))
-    return true
+    try {
+      const base = getNotesFolder()
+      const dir = data.folderId ? join(base, data.folderId) : base
+      const payload = { id: data.id, title: data.title, content: data.content, updatedAt: Date.now() }
+      writeFileSync(join(dir, `${data.id}.json`), JSON.stringify(payload, null, 2))
+      return true
+    } catch (err) {
+      logError(MAIN_LABEL, 'notes-save failed', err)
+      captureToSentry(err, 'notes-save')
+      throw err
+    }
   })
 
   ipcMain.handle('notes-create', (_event, folderId?: string) => {
@@ -538,27 +579,36 @@ app.whenReady().then(async () => {
     const wavPath = join(tempDir, `transcribe-${ts}.wav`)
 
     try {
+      if (!audioBuffer || !(audioBuffer instanceof ArrayBuffer)) {
+        throw new Error('Invalid audio buffer')
+      }
       writeFileSync(webmPath, Buffer.from(audioBuffer))
 
-      // Convert webm to wav via ffmpeg (faster-whisper handles wav more reliably)
       const ffmpegResult = await new Promise<boolean>((resolve) => {
         const ff = spawn('ffmpeg', ['-y', '-i', webmPath, '-acodec', 'pcm_s16le', '-ar', '16000', '-ac', '1', wavPath], { stdio: 'ignore' })
         ff.on('close', (code) => resolve(code === 0))
-        ff.on('error', () => resolve(false))
+        ff.on('error', (e) => {
+          logError(MAIN_LABEL, 'ffmpeg spawn error', e)
+          resolve(false)
+        })
       })
 
       const audioPath = ffmpegResult && existsSync(wavPath) ? wavPath : webmPath
+      if (audioPath === webmPath) {
+        log('warn', MAIN_LABEL, 'Transcribe: ffmpeg conversion failed, using webm')
+      }
 
       const binaryPath = getTranscriberPath()
       if (!existsSync(binaryPath)) {
-        throw new Error(
+        const err = new Error(
           `Transcriber not found at ${binaryPath}. Run: cd python_backend && pyinstaller --onefile transcribe.py -n transcriber --distpath dist`
         )
+        logError(MAIN_LABEL, 'Transcribe: transcriber binary missing', err)
+        throw err
       }
 
       const result = await new Promise<string>((resolve, reject) => {
         const proc = spawn(binaryPath, [audioPath], { stdio: ['ignore', 'pipe', 'pipe'] })
-
         let stdout = ''
         let stderr = ''
 
@@ -582,12 +632,17 @@ app.whenReady().then(async () => {
                 /* stdout wasn't valid JSON */
               }
             }
-            reject(new Error(stderr.trim() || out || `Process exited with code ${code}`))
+            const msg = stderr.trim() || out || `Process exited with code ${code}`
+            log('error', MAIN_LABEL, `Transcribe: ${msg}`)
+            reject(new Error(msg))
             return
           }
           resolve(stdout)
         })
-        proc.on('error', (err) => reject(err))
+        proc.on('error', (err) => {
+          logError(MAIN_LABEL, 'Transcribe: transcriber process error', err)
+          reject(err)
+        })
       })
 
       const parsed = JSON.parse(result.trim())
@@ -595,7 +650,10 @@ app.whenReady().then(async () => {
         throw new Error(parsed.error)
       }
       trackEvent('transcription_used', { duration: Math.round((Date.now() - startMs) / 1000) })
-      return parsed.text || ''
+      return parsed.text ?? ''
+    } catch (err) {
+      logError(MAIN_LABEL, 'Transcribe failed', err)
+      throw err
     } finally {
       for (const p of [webmPath, wavPath]) {
         if (existsSync(p)) {
