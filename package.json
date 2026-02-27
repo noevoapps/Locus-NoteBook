@@ -16,6 +16,15 @@
       "resources/**/*",
       "python_backend/dist/**/transcriber*"
     ],
+    "extraResources": [
+      {
+        "from": "python_backend/dist",
+        "to": "python_backend/dist",
+        "filter": [
+          "transcriber*"
+        ]
+      }
+    ],
     "win": {
       "target": [
         "nsis"

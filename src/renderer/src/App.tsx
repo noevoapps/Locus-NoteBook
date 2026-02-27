@@ -489,6 +489,7 @@ export default function App(): React.JSX.Element {
   const editorContextMenuRef = useRef<HTMLDivElement>(null)
   const editorContainerRef = useRef<HTMLDivElement>(null)
   const codeBlockSelectInteractingRef = useRef(false)
+  const scheduleCodeBlockLineNumbersRef = useRef<(() => void) | null>(null)
   const isMountedRef = useRef(true)
   const currentNoteIdRef = useRef<string | null>(null)
   const autoSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -837,12 +838,13 @@ export default function App(): React.JSX.Element {
     })
   }, [selectedNoteId, selectedFolderId, loadNoteContent])
 
-  // Add line numbers to code blocks
+  // Add line numbers to code blocks (debounced to avoid freezing when typing)
   useEffect(() => {
     const container = editorContainerRef.current
     if (!container) return
 
     const LINE_NUMBERS_CLASS = 'locus-line-numbers'
+    const DEBOUNCE_MS = 200
 
     function updateCodeBlockLineNumbers(block: Element) {
       const pre = block.querySelector(':scope > pre')
@@ -872,15 +874,22 @@ export default function App(): React.JSX.Element {
       container.querySelectorAll('.bn-block-content[data-content-type="codeBlock"]').forEach(updateCodeBlockLineNumbers)
     }
 
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null
+    function scheduleProcessAllCodeBlocks() {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null
+        requestAnimationFrame(processAllCodeBlocks)
+      }, DEBOUNCE_MS)
+    }
+
     let observer: MutationObserver | null = null
 
     function startObserving() {
       if (!container) return
       if (observer) return
-      observer = new MutationObserver(() => {
-        requestAnimationFrame(processAllCodeBlocks)
-      })
-      observer.observe(container, { childList: true, subtree: true, characterData: true })
+      observer = new MutationObserver(scheduleProcessAllCodeBlocks)
+      observer.observe(container, { childList: true, subtree: true })
     }
 
     function stopObserving() {
@@ -901,6 +910,7 @@ export default function App(): React.JSX.Element {
     }
 
     processAllCodeBlocks()
+    scheduleCodeBlockLineNumbersRef.current = scheduleProcessAllCodeBlocks
     startObserving()
 
     const handleMouseDown = (e: MouseEvent) => {
@@ -932,6 +942,8 @@ export default function App(): React.JSX.Element {
     container.addEventListener('focusout', handleFocusOut, true)
 
     return () => {
+      if (debounceTimer) clearTimeout(debounceTimer)
+      scheduleCodeBlockLineNumbersRef.current = null
       stopObserving()
       container.removeEventListener('mousedown', handleMouseDown, true)
       container.removeEventListener('focusin', handleFocusIn, true)
@@ -981,6 +993,7 @@ export default function App(): React.JSX.Element {
   const AUTO_SAVE_DELAY_MS = 7000
   const handleEditorChange = useCallback(() => {
     if (!selectedNoteId || !editor) return
+    scheduleCodeBlockLineNumbersRef.current?.()
     if (autoSaveTimeoutRef.current) clearTimeout(autoSaveTimeoutRef.current)
     autoSaveTimeoutRef.current = setTimeout(() => {
       autoSaveTimeoutRef.current = null
@@ -1158,7 +1171,14 @@ export default function App(): React.JSX.Element {
         }
 
         const noteIdAtStart = selectedNoteId
-        const failureMessage = 'Transcription failed. Right-click the audio and choose Transcribe to retry.'
+        const failureMessageBase = 'Transcription failed. Right-click the audio and choose Transcribe to retry.'
+        const failureMessageWithReason = (reason: unknown) => {
+          const raw = reason instanceof Error ? reason.message : String(reason ?? '')
+          const msg = raw.trim()
+          if (!msg) return failureMessageBase
+          const clipped = msg.length > 160 ? `${msg.slice(0, 160)}…` : msg
+          return `Transcription failed: ${clipped}. Right-click the audio and choose Transcribe to retry.`
+        }
 
         const dataUrl = await blobToDataUrl(blob)
         const doc = editor.document
@@ -1194,7 +1214,7 @@ export default function App(): React.JSX.Element {
                   editor.replaceBlocks([block], [{ type: 'paragraph', content: text.trim() }])
                   setTranscribeStatusWithAutoClear({ type: 'success' }, 3000)
                 } else {
-                  editor.replaceBlocks([block], [{ type: 'paragraph', content: failureMessage }])
+                  editor.replaceBlocks([block], [{ type: 'paragraph', content: failureMessageBase }])
                   setTranscribeStatusWithAutoClear({ type: 'error', message: 'No text returned' }, 5000)
                 }
               }
@@ -1208,7 +1228,7 @@ export default function App(): React.JSX.Element {
               try {
                 const block = editor.getBlock(placeholderId)
                 if (block) {
-                  editor.replaceBlocks([block], [{ type: 'paragraph', content: failureMessage }])
+                  editor.replaceBlocks([block], [{ type: 'paragraph', content: failureMessageWithReason(err) }])
                   setTranscribeStatusWithAutoClear(
                     { type: 'error', message: err instanceof Error ? err.message : String(err) },
                     5000
@@ -1233,10 +1253,7 @@ export default function App(): React.JSX.Element {
       } catch (err) {
         console.error('Recording/transcription failed:', err)
         setIsTranscribing(false)
-        setTranscribeStatusWithAutoClear(
-          { type: 'error', message: err instanceof Error ? err.message : String(err) },
-          5000
-        )
+        setTranscribeStatusWithAutoClear({ type: 'error', message: err instanceof Error ? err.message : String(err) }, 5000)
       }
     } else {
       await startRecording()

@@ -566,7 +566,20 @@ app.whenReady().then(async () => {
   const getTranscriberPath = (): string => {
     const binaryName = isWindows ? 'transcriber.exe' : 'transcriber'
     if (app.isPackaged) {
-      return join(process.resourcesPath, binaryName)
+      // In packaged apps, we ship the transcriber as an extra resource so it's executable (not inside app.asar).
+      // Preferred location: resources/python_backend/dist/transcriber.exe
+      const preferred = join(process.resourcesPath, 'python_backend', 'dist', binaryName)
+      if (existsSync(preferred)) return preferred
+
+      // Back-compat / fallback locations (older builds or different packaging layouts)
+      const legacyRoot = join(process.resourcesPath, binaryName)
+      if (existsSync(legacyRoot)) return legacyRoot
+
+      const unpacked = join(process.resourcesPath, 'app.asar.unpacked', 'python_backend', 'dist', binaryName)
+      if (existsSync(unpacked)) return unpacked
+
+      // Return preferred so error message points to intended location
+      return preferred
     }
     return join(app.getAppPath(), 'python_backend', 'dist', binaryName)
   }
@@ -577,6 +590,7 @@ app.whenReady().then(async () => {
     const ts = Date.now()
     const webmPath = join(tempDir, `transcribe-${ts}.webm`)
     const wavPath = join(tempDir, `transcribe-${ts}.wav`)
+    const whisperCacheDir = join(app.getPath('userData'), 'whisper-cache')
 
     try {
       if (!audioBuffer || !(audioBuffer instanceof ArrayBuffer)) {
@@ -608,7 +622,19 @@ app.whenReady().then(async () => {
       }
 
       const result = await new Promise<string>((resolve, reject) => {
-        const proc = spawn(binaryPath, [audioPath], { stdio: ['ignore', 'pipe', 'pipe'] })
+        const proc = spawn(binaryPath, [audioPath], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: {
+            ...process.env,
+            // Ensure faster-whisper model downloads/caching happen in a stable app-owned directory.
+            // This makes subsequent runs work offline (once the model is cached).
+            HF_HOME: whisperCacheDir,
+            HUGGINGFACE_HUB_CACHE: whisperCacheDir,
+            XDG_CACHE_HOME: whisperCacheDir,
+            TRANSFORMERS_CACHE: whisperCacheDir,
+            HF_HUB_DISABLE_TELEMETRY: '1'
+          }
+        })
         let stdout = ''
         let stderr = ''
 
